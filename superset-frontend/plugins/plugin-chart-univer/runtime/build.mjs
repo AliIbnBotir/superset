@@ -21,7 +21,7 @@
 // index.ts for why). Superset's build, build-dev, dev and dev-server scripts
 // run this first through `npm run build-univer-runtime`.
 import { execSync } from 'child_process';
-import { existsSync, rmSync, writeFileSync } from 'fs';
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -32,7 +32,12 @@ if (!existsSync(resolve(here, 'node_modules'))) {
   execSync('npm ci --no-audit --no-fund', { cwd: here, stdio: 'inherit' });
 }
 
-rmSync(outDir, { recursive: true, force: true });
+// empty the folder rather than delete it: a running dev server watching it
+// would otherwise miss the new files
+mkdirSync(outDir, { recursive: true });
+readdirSync(outDir).forEach(name =>
+  rmSync(resolve(outDir, name), { recursive: true, force: true }),
+);
 
 // imported after the install above, esbuild comes from this project
 const { build } = await import('esbuild');
