@@ -17,6 +17,8 @@
  * under the License.
  */
 
+import type { Outline } from './utils/outline';
+
 /**
  * Types shared by the chart (React 17, Superset) and the Univer runtime
  * (React 18, bundled separately, see runtime/index.ts). They describe the
@@ -67,6 +69,7 @@ export interface SheetData {
   mergeData?: MergeRange[];
   defaultColumnWidth?: number;
   columnData?: Record<number, { w?: number; hd?: number }>;
+  rowData?: Record<number, { h?: number; hd?: number }>;
   rowHeader?: { width: number; hidden?: number };
   columnHeader?: { height: number; hidden?: number };
   [key: string]: unknown;
@@ -94,6 +97,15 @@ export interface MountUniverOptions {
    * set, the column menu gets a "Fill the window" item while they take up less.
    */
   getFillWidth?: () => number;
+  /** collapsible row and column groups, see src/utils/outline.ts */
+  outline?: Outline;
+  /** called when the user groups, ungroups, collapses or expands */
+  onOutlineChange?: (outline: Outline) => void;
+  /**
+   * false when the 1, 2, 3… and A, B, C… headers are hidden; the headers
+   * then only show the margin for the groups, if there are any
+   */
+  headerLabels?: boolean;
 }
 
 export interface UniverHandle {

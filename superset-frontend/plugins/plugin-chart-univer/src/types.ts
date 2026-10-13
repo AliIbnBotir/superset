@@ -54,5 +54,11 @@ export interface UniverChartProps {
    * columns. The other columns hold the values, see `buildPivotGrid`.
    */
   pivotRows?: number;
+  /**
+   * How many of the first columns identify a row (the dimensions), used to
+   * keep row groups on the same rows when the data changes. All columns
+   * when not set.
+   */
+  keyColumns?: number;
   setControlValue?: HandlerFunction;
 }

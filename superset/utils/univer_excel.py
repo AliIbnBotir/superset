@@ -72,6 +72,28 @@ def default_layout() -> GridLayout:
     return {"headerRows": 1, "frozenCols": 0, "merges": []}
 
 
+class _OutlineGroupBase(TypedDict):
+    start: int
+    end: int
+
+
+class OutlineGroup(_OutlineGroupBase, total=False):
+    """Rows (or columns) ``start`` to ``end``, see the frontend's outline.ts."""
+
+    collapsed: bool
+
+
+class Outline(TypedDict):
+    """Collapsible row and column groups of the first sheet."""
+
+    rows: list[OutlineGroup]
+    columns: list[OutlineGroup]
+
+
+# where the first sheet's outline is kept for the writer
+OUTLINE_KEY = "_superset_outline"
+
+
 HEADER_STYLE_ID = "superset_header"
 # cell fields that hold the value, everything else (like style) is kept
 DATA_KEYS = ("v", "t", "f", "si", "p")
@@ -455,6 +477,127 @@ def _saved_headers(grid: Grid, saved: dict[str, Any], header_rows: int) -> Grid:
     return headers
 
 
+def _js_string(value: Any) -> str:
+    """A cell value as JavaScript's String() writes it, like the frontend."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        return str(int(value)) if value.is_integer() else repr(value)
+    return str(value)
+
+
+def _outline_keys(
+    grid: Grid, header_rows: int, key_columns: Optional[int]
+) -> tuple[list[Optional[str]], list[Optional[str]]]:
+    """Keys of the data rows and columns, see ``outlineKeys`` in outline.ts."""
+    cols = len(grid[0]) if grid else 0
+    rows = [
+        None
+        if r < header_rows
+        else "\u0001".join(_js_string(v) for v in row[: key_columns or cols])
+        for r, row in enumerate(grid)
+    ]
+    columns = [
+        "\u0001".join(_js_string(row[c]) for row in grid[:header_rows])
+        for c in range(cols)
+    ]
+    return rows, columns
+
+
+def _add_group(
+    groups: list[OutlineGroup], start: int, end: int
+) -> Optional[list[OutlineGroup]]:
+    """Adds a group unless it crosses or repeats another, see ``addGroup``."""
+    start, end = min(start, end), max(start, end)
+    for other in groups:
+        same = other["start"] == start and other["end"] == end
+        overlaps = other["start"] <= end and start <= other["end"]
+        nested = (other["start"] <= start and end <= other["end"]) or (
+            start <= other["start"] and other["end"] <= end
+        )
+        if same or (overlaps and not nested):
+            return None
+    return sorted(
+        [*groups, {"start": start, "end": end}],
+        key=lambda group: (group["start"], -(group["end"] - group["start"])),
+    )
+
+
+def _resolve_groups(
+    saved: list[dict[str, Any]], keys: list[Optional[str]]
+) -> list[OutlineGroup]:
+    def resolve(anchor: dict[str, Any]) -> Optional[int]:
+        if "key" in anchor:
+            return keys.index(anchor["key"]) if anchor["key"] in keys else None
+        if "after" in anchor:
+            return len(keys) + int(anchor["after"])
+        return int(anchor.get("index", 0))
+
+    groups: list[OutlineGroup] = []
+    for group in saved:
+        start = resolve(group.get("start") or {})
+        end = resolve(group.get("end") or {})
+        if start is None or end is None:
+            continue
+        added = _add_group(groups, start, end)
+        if added is None:
+            continue
+        for new in added:
+            if (
+                new["start"] == min(start, end)
+                and new["end"] == max(start, end)
+                and group.get("collapsed")
+            ):
+                new["collapsed"] = True
+        groups = added
+    return groups
+
+
+def resolve_outline(
+    saved: Optional[dict[str, Any]],
+    grid: Grid,
+    header_rows: int,
+    key_columns: Optional[int],
+) -> Outline:
+    """The saved groups on the current query result, see ``resolveOutline``."""
+    if not saved:
+        return {"rows": [], "columns": []}
+    row_keys, column_keys = _outline_keys(grid, header_rows, key_columns)
+    return {
+        "rows": _resolve_groups(saved.get("rows") or [], row_keys),
+        "columns": _resolve_groups(saved.get("columns") or [], column_keys),
+    }
+
+
+def apply_outline(workbook: UniverWorkbook, outline: Outline, grid: Grid) -> None:
+    """
+    Hides the rows and columns of collapsed groups and shows the others of
+    the query result, like the frontend's ``applyOutline``. Keeps the outline
+    with the first sheet for the writer. Modifies ``workbook``.
+    """
+    sheet = _first_sheet(workbook)
+    if sheet is None or not (outline["rows"] or outline["columns"]):
+        return
+    sheet[OUTLINE_KEY] = outline
+    for key, groups, count in (
+        ("rowData", outline["rows"], len(grid)),
+        ("columnData", outline["columns"], len(grid[0]) if grid else 0),
+    ):
+        data = {
+            str(i): dict(value or {}) for i, value in (sheet.get(key) or {}).items()
+        }
+        for i in range(count):
+            if (data.get(str(i)) or {}).get("hd"):
+                data[str(i)]["hd"] = 0
+        for group in groups:
+            if group.get("collapsed"):
+                for i in range(group["start"], group["end"] + 1):
+                    data.setdefault(str(i), {})["hd"] = 1
+        sheet[key] = data
+
+
 def _to_hex(color: Any) -> Optional[str]:
     """'#F2F2F2', '#FFF' or 'rgb(242, 242, 242)' as '#F2F2F2'."""
     rgb = str((color or {}).get("rgb") or "").strip()
@@ -649,11 +792,42 @@ def _set_layout(ws: Worksheet, sheet: dict[str, Any]) -> None:
         ws.freeze_panes(y_split, x_split)
 
 
+def _outline_levels(groups: list[OutlineGroup]) -> tuple[dict[int, int], set[int]]:
+    """
+    Excel outline level of each row (or column) in a group, and the rows
+    after collapsed groups, which Excel marks as collapsed.
+    """
+    levels: dict[int, int] = {}
+    for group in groups:
+        for i in range(group["start"], group["end"] + 1):
+            # Excel has at most 7 levels
+            levels[i] = min(levels.get(i, 0) + 1, 7)
+    collapsed = {group["end"] + 1 for group in groups if group.get("collapsed")}
+    return levels, collapsed
+
+
+def _dimension_options(
+    hidden: bool, level: int, collapsed: bool
+) -> Optional[dict[str, Any]]:
+    options = {"hidden": hidden, "level": level, "collapsed": collapsed}
+    return {key: value for key, value in options.items() if value} or None
+
+
 def _set_dimensions(ws: Worksheet, sheet: dict[str, Any]) -> None:
-    """Column widths, row heights and hidden rows and columns."""
+    """Column widths, row heights, hidden rows and columns, and groups."""
+    outline: Outline = sheet.get(OUTLINE_KEY) or {"rows": [], "columns": []}
+    column_levels, collapsed_columns = _outline_levels(outline["columns"])
+    row_levels, collapsed_rows = _outline_levels(outline["rows"])
+
     default_width = sheet.get("defaultColumnWidth") or DEFAULT_COL_WIDTH
     columns = sheet.get("columnData") or {}
-    count = max([sheet.get("columnCount") or 0, *[int(c) + 1 for c in columns]])
+    count = max(
+        [
+            sheet.get("columnCount") or 0,
+            *[int(c) + 1 for c in columns],
+            *[c + 1 for c in column_levels],
+        ]
+    )
     for c in range(count):
         column = columns.get(str(c)) or {}
         ws.set_column_pixels(
@@ -661,16 +835,27 @@ def _set_dimensions(ws: Worksheet, sheet: dict[str, Any]) -> None:
             c,
             column.get("w") or default_width,
             None,
-            {"hidden": True} if column.get("hd") else None,
+            _dimension_options(
+                bool(column.get("hd")),
+                column_levels.get(c, 0),
+                c in collapsed_columns,
+            ),
         )
-    for r, row in (sheet.get("rowData") or {}).items():
-        if row and (row.get("h") or row.get("hd")):
-            ws.set_row_pixels(
-                int(r),
-                row.get("h") or sheet.get("defaultRowHeight") or DEFAULT_ROW_HEIGHT,
-                None,
-                {"hidden": True} if row.get("hd") else None,
-            )
+
+    rows = sheet.get("rowData") or {}
+    indexes = {
+        int(r) for r, row in rows.items() if row and (row.get("h") or row.get("hd"))
+    }
+    for r in sorted(indexes | set(row_levels) | collapsed_rows):
+        row = rows.get(str(r)) or {}
+        ws.set_row_pixels(
+            r,
+            row.get("h") or sheet.get("defaultRowHeight") or DEFAULT_ROW_HEIGHT,
+            None,
+            _dimension_options(
+                bool(row.get("hd")), row_levels.get(r, 0), r in collapsed_rows
+            ),
+        )
 
 
 def _sheet_names(sheets: list[dict[str, Any]]) -> list[str]:
@@ -745,11 +930,27 @@ def df_to_univer_excel(
     else:
         grid, layout = build_grid(df, coltypes, labels), default_layout()
     saved = parse_saved_state(form_data.get(WORKBOOK_CONTROL))
-    live_data = form_data.get(LIVE_DATA_CONTROL)
-    workbook = build_workbook(
-        grid,
-        saved,
-        True if live_data is None else bool(live_data),
-        layout,
+    live_data = (
+        True
+        if form_data.get(LIVE_DATA_CONTROL) is None
+        else bool(form_data.get(LIVE_DATA_CONTROL))
     )
+    workbook = build_workbook(grid, saved, live_data, layout)
+    from_query = live_data or bool(saved and saved.get("stripped"))
+    outline = resolve_outline(
+        (saved or {}).get("outline"),
+        grid if from_query else [],
+        layout["headerRows"],
+        _key_columns(form_data),
+    )
+    apply_outline(workbook, outline, grid)
     return workbook_to_excel(workbook)
+
+
+def _key_columns(form_data: dict[str, Any]) -> Optional[int]:
+    """How many of the first columns identify a row, as in transformProps."""
+    if form_data.get("query_mode") == PIVOT_MODE:
+        return len(form_data.get(PIVOT_ROWS_CONTROL) or [])
+    if form_data.get("query_mode") == "raw":
+        return None
+    return len(form_data.get("groupby") or []) or None

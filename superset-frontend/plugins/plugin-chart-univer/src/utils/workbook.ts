@@ -19,6 +19,14 @@
 import { cloneDeep, omit } from 'lodash';
 import { DataRecord, GenericDataType } from '@superset-ui/core';
 import {
+  anchorOutline,
+  hiddenIndexes,
+  Outline,
+  outlineDepth,
+  outlineMargin,
+  SavedOutline,
+} from './outline';
+import {
   CellData,
   CellValue,
   MergeRange,
@@ -63,6 +71,8 @@ export interface UniverSavedState {
   headerGrid?: (CellValue | null)[][];
   /** layout of the query result when it was saved */
   layout?: GridLayout;
+  /** collapsible row and column groups */
+  outline?: SavedOutline;
   workbook: WorkbookData;
 }
 
@@ -590,6 +600,7 @@ export function serializeState(
   grid: Grid,
   liveData: boolean,
   layout: GridLayout = DEFAULT_LAYOUT,
+  outline?: { groups: Outline; keyColumns?: number },
 ): string {
   const { rows, cols } = gridSize(grid);
   const state: UniverSavedState = {
@@ -600,9 +611,101 @@ export function serializeState(
     headers: grid[0] ?? [],
     headerGrid: grid.slice(0, layout.headerRows),
     layout,
+    ...(outline && (outline.groups.rows.length || outline.groups.columns.length)
+      ? {
+          // without live data the sheet keeps its rows, groups keep theirs
+          outline: anchorOutline(
+            outline.groups,
+            liveData ? grid : [],
+            layout.headerRows,
+            outline.keyColumns,
+          ),
+        }
+      : {}),
     workbook: liveData
       ? stripGrid(workbook, grid, layout.headerRows)
       : workbook,
   };
   return JSON.stringify(state);
+}
+
+/**
+ * Hides the rows and columns of collapsed groups. Rows and columns of the
+ * query result are shown otherwise: what was hidden there when the chart was
+ * saved may be other data after a refresh. Returns a new workbook.
+ */
+export function applyOutline(
+  workbook: WorkbookData,
+  outline: Outline,
+  grid: Grid,
+): WorkbookData {
+  const sheetId = workbook.sheetOrder?.[0];
+  const sheet = sheetId ? workbook.sheets?.[sheetId] : undefined;
+  if (!sheetId || !sheet) return workbook;
+  if (!outline.rows.length && !outline.columns.length) return workbook;
+  const { rows, cols } = gridSize(grid);
+
+  const hide = <T extends { hd?: number }>(
+    data: Record<number, T> | undefined,
+    count: number,
+    hidden: Set<number>,
+  ): Record<number, T> => {
+    const result: Record<number, T> = { ...data };
+    for (let i = 0; i < count; i += 1) {
+      if (result[i]?.hd) result[i] = { ...result[i], hd: 0 };
+    }
+    hidden.forEach(i => {
+      result[i] = { ...result[i], hd: 1 };
+    });
+    return result;
+  };
+  return {
+    ...workbook,
+    sheets: {
+      ...workbook.sheets,
+      [sheetId]: {
+        ...sheet,
+        rowData: hide(sheet.rowData, rows, hiddenIndexes(outline.rows)),
+        columnData: hide(
+          sheet.columnData,
+          cols,
+          hiddenIndexes(outline.columns),
+        ),
+      },
+    },
+  };
+}
+
+// Univer's default height of the A, B, C… header
+const COLUMN_HEADER_HEIGHT = 20;
+
+/**
+ * Sizes the 1, 2, 3… and A, B, C… headers of every sheet: hidden when
+ * `labels` is false, plus the margin for the first sheet's groups.
+ */
+export function sizeHeaders(
+  workbook: WorkbookData,
+  labels: boolean,
+  outline: Outline,
+): WorkbookData {
+  const rowMargin = outlineMargin(outlineDepth(outline.rows));
+  const columnMargin = outlineMargin(outlineDepth(outline.columns));
+  const first = workbook.sheetOrder?.[0];
+  const sheets = Object.fromEntries(
+    Object.entries(workbook.sheets ?? {}).map(([id, sheet]) => {
+      const width =
+        (labels ? ROW_HEADER_WIDTH : 0) + (id === first ? rowMargin : 0);
+      const height =
+        (labels ? COLUMN_HEADER_HEIGHT : 0) + (id === first ? columnMargin : 0);
+      return [
+        id,
+        {
+          ...sheet,
+          rowHeader: { width, hidden: width ? 0 : 1 },
+          columnHeader: { height, hidden: height ? 0 : 1 },
+        },
+      ];
+    }),
+  );
+  return { ...workbook, sheets };
 }

@@ -16,9 +16,22 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { AppSection, ChartProps, ensureIsArray } from '@superset-ui/core';
+import {
+  AppSection,
+  ChartProps,
+  ensureIsArray,
+  QueryMode,
+} from '@superset-ui/core';
 import { UniverChartProps, UniverQueryFormData } from '../types';
 import { PIVOT_MODE } from './controls/shared';
+
+function keyColumns(formData: UniverQueryFormData): number | undefined {
+  if (formData.query_mode === PIVOT_MODE) {
+    return ensureIsArray(formData.univer_pivot_rows).length;
+  }
+  if (formData.query_mode === QueryMode.Raw) return undefined;
+  return ensureIsArray(formData.groupby).length || undefined;
+}
 
 export default function transformProps(
   chartProps: ChartProps,
@@ -44,5 +57,6 @@ export default function transformProps(
       formData.query_mode === PIVOT_MODE
         ? ensureIsArray(formData.univer_pivot_rows).length
         : undefined,
+    keyColumns: keyColumns(formData),
   };
 }

@@ -252,3 +252,35 @@ def test_export_pivot() -> None:
     ]
     assert {str(merge) for merge in ws.merged_cells.ranges} == {"A1:A2", "B1:D1"}
     assert ws.freeze_panes == "B3"
+
+
+def test_export_outline_groups() -> None:
+    state = json.loads(saved_state())
+    state["outline"] = {
+        "rows": [
+            {"start": {"key": "Puzzle"}, "end": {"key": "Racing"}, "collapsed": True}
+        ],
+        "columns": [{"start": {"index": 1}, "end": {"index": 1}}],
+    }
+    df = pd.DataFrame(
+        {"genre": ["Action", "Puzzle", "Racing", "Sports"], "Total": [1, 2, 3, 4]}
+    )
+    ws = export(
+        {
+            "viz_type": "univer_sheet",
+            "groupby": ["genre"],
+            "univer_workbook": json.dumps(state),
+        },
+        df,
+    ).active
+    # Puzzle and Racing are rows 3 and 4, grouped and collapsed
+    assert [ws.row_dimensions[r].outline_level for r in (2, 3, 4, 5)] == [
+        0,
+        1,
+        1,
+        0,
+    ]
+    assert ws.row_dimensions[3].hidden
+    assert ws.row_dimensions[4].hidden
+    assert not ws.row_dimensions[2].hidden
+    assert ws.column_dimensions["B"].outline_level == 1

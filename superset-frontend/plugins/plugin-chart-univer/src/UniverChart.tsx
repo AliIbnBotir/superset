@@ -34,13 +34,21 @@ import {
   DEFAULT_LAYOUT,
   columnWidth,
   fillWidth,
-  hideHeaders,
+  applyOutline,
+  sizeHeaders,
   parseSavedState,
   serializeState,
   StretchedColumns,
   stretchColumns,
   unstretchColumns,
 } from './utils/workbook';
+import {
+  EMPTY_OUTLINE,
+  Outline,
+  outlineDepth,
+  outlineMargin,
+  resolveOutline,
+} from './utils/outline';
 
 // wait for a burst of edits (typing, pasting, dragging) to finish before saving
 const SAVE_DELAY_MS = 300;
@@ -67,6 +75,7 @@ export default function UniverChart(props: UniverChartProps) {
     showHeaders,
     setControlValue,
     pivotRows,
+    keyColumns,
   } = props;
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -116,14 +125,32 @@ export default function UniverChart(props: UniverChartProps) {
   widthRef.current = width;
   const handleRef = useRef<UniverHandle | null>(null);
   const stretchedRef = useRef<StretchedColumns>({});
+  // collapsible groups of the sheet on screen
+  const outlineRef = useRef<Outline>(EMPTY_OUTLINE);
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
 
     const saved = parseSavedState(latestStateRef.current);
-    let workbookData = buildWorkbook(grid, saved, liveData, layout);
-    if (!editable && !showHeaders) workbookData = hideHeaders(workbookData);
+    // groups are tied to the query's rows when they come from the query
+    outlineRef.current = resolveOutline(
+      saved?.outline,
+      liveData || saved?.stripped ? grid : [],
+      layout.headerRows,
+      keyColumns,
+    );
+    const mountedOutline = outlineRef.current;
+    const headerLabels = editable || showHeaders;
+    const workbookData = sizeHeaders(
+      applyOutline(
+        buildWorkbook(grid, saved, liveData, layout),
+        mountedOutline,
+        grid,
+      ),
+      headerLabels,
+      mountedOutline,
+    );
     const fitted = stretchColumns(workbookData, widthRef.current);
     stretchedRef.current = fitted.stretched;
 
@@ -135,6 +162,7 @@ export default function UniverChart(props: UniverChartProps) {
         grid,
         liveData,
         layout,
+        { groups: outlineRef.current, keyColumns },
       );
       if (state === lastSavedRef.current || state === latestStateRef.current) {
         return;
@@ -151,7 +179,19 @@ export default function UniverChart(props: UniverChartProps) {
       workbook: fitted.workbook,
       editable,
       onChange: editable ? save : undefined,
-      getFillWidth: () => fillWidth(fitted.workbook, widthRef.current),
+      // the margin for row groups grows and shrinks as groups change
+      getFillWidth: () =>
+        fillWidth(fitted.workbook, widthRef.current) +
+        outlineMargin(outlineDepth(mountedOutline.rows)) -
+        outlineMargin(outlineDepth(outlineRef.current.rows)),
+      outline: mountedOutline,
+      headerLabels,
+      onOutlineChange: editable
+        ? outline => {
+            outlineRef.current = outline;
+            save();
+          }
+        : undefined,
     });
     handleRef.current = handle;
 
@@ -161,7 +201,15 @@ export default function UniverChart(props: UniverChartProps) {
       handleRef.current = null;
       handle?.dispose();
     };
-  }, [grid, layout, editable, liveData, showHeaders, externalVersion]);
+  }, [
+    grid,
+    layout,
+    keyColumns,
+    editable,
+    liveData,
+    showHeaders,
+    externalVersion,
+  ]);
 
   useEffect(() => {
     const restretch = debounce(() => {

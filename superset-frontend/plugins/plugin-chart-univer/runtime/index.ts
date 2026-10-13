@@ -44,6 +44,7 @@ import { Observable } from 'rxjs';
 import UniverPresetSheetsCoreEnUS from '@univerjs/preset-sheets-core/locales/en-US';
 import '@univerjs/preset-sheets-core/lib/index.css';
 import type { MountUniver, WorkbookData } from '../src/runtimeTypes';
+import { mountOutline } from './outline';
 
 export const mountUniver: MountUniver = ({
   container,
@@ -51,7 +52,16 @@ export const mountUniver: MountUniver = ({
   editable,
   onChange,
   getFillWidth,
+  outline,
+  onOutlineChange,
+  headerLabels = true,
 }) => {
+  // Univer's own element, so that it leaves alone the group buttons placed
+  // next to it in `container` (see outline.ts)
+  const host = document.createElement('div');
+  // its own stacking context, below the buttons
+  host.style.cssText = 'width:100%;height:100%;position:relative;z-index:0;';
+  container.appendChild(host);
   const { univer, univerAPI } = createUniver({
     locale: LocaleType.EN_US,
     locales: {
@@ -59,7 +69,7 @@ export const mountUniver: MountUniver = ({
     },
     presets: [
       UniverSheetsCorePreset({
-        container,
+        container: host,
         header: editable,
         toolbar: editable,
         formulaBar: editable,
@@ -145,6 +155,17 @@ export const mountUniver: MountUniver = ({
         })
       : null;
 
+  const outlineView = mountOutline({
+    univer,
+    univerAPI,
+    workbook,
+    container,
+    outline: outline ?? { rows: [], columns: [] },
+    editable,
+    headerLabels,
+    onChange: onOutlineChange,
+  });
+
   return {
     save: () => workbook.save() as unknown as WorkbookData,
     setColumnWidths: widths => {
@@ -169,7 +190,9 @@ export const mountUniver: MountUniver = ({
     },
     dispose: () => {
       listener?.dispose();
+      outlineView.dispose();
       univer.dispose();
+      host.remove();
     },
   };
 };
