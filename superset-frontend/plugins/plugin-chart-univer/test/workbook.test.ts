@@ -22,11 +22,14 @@ import {
   buildGrid,
   buildWorkbook,
   createWorkbookData,
+  fitSheetSize,
   hideHeaders,
   HEADER_STYLE_ID,
   parseSavedState,
   serializeState,
+  stretchColumns,
   toCellValue,
+  unstretchColumns,
 } from '../src/utils/workbook';
 
 const cells = (workbook: ReturnType<typeof createWorkbookData>) =>
@@ -77,7 +80,47 @@ test('createWorkbookData widens columns with long content', () => {
     ['SUM(global_sales)', 'n'],
     ['x', 1],
   ]);
-  expect(workbook.sheets!.data.columnData).toEqual({ 0: { w: 152 } });
+  expect(workbook.sheets!.data.columnData).toEqual({
+    0: { w: 152 },
+    1: { w: 80 },
+  });
+});
+
+test('createWorkbookData sizes the sheet to the data', () => {
+  const sheet = createWorkbookData(grid).sheets!.data;
+  expect(sheet.rowCount).toBe(3);
+  expect(sheet.columnCount).toBe(2);
+});
+
+test('fitSheetSize keeps cells added outside the data', () => {
+  const workbook = createWorkbookData(grid);
+  workbook.sheets!.data.rowCount = 40;
+  cells(workbook)[5] = { 3: { f: '=SUM(B2:B3)' } };
+  const sheet = fitSheetSize(workbook, grid).sheets!.data;
+  expect(sheet.rowCount).toBe(6);
+  expect(sheet.columnCount).toBe(4);
+});
+
+test('stretchColumns fills the width and unstretchColumns restores it', () => {
+  // 46px row header + 12px scrollbar + two 160px columns
+  const workbook = createWorkbookData([['a', 'b']]);
+  const { workbook: wide, stretched } = stretchColumns(workbook, 378);
+  expect(wide.sheets!.data.columnData).toEqual({
+    0: { w: 160 },
+    1: { w: 160 },
+  });
+
+  // the user widened the second column
+  wide.sheets!.data.columnData![1].w = 200;
+  expect(unstretchColumns(wide, stretched).sheets!.data.columnData).toEqual({
+    0: { w: 80 },
+    1: { w: 200 },
+  });
+});
+
+test('stretchColumns leaves overflowing columns alone', () => {
+  const workbook = createWorkbookData([['a', 'b']]);
+  expect(stretchColumns(workbook, 150)).toEqual({ workbook, stretched: {} });
 });
 
 test('applyGrid refreshes values, keeps styles and clears old cells', () => {

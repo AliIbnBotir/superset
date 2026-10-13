@@ -37,18 +37,20 @@ export interface UniverSavedState {
 export const HEADER_STYLE_ID = 'superset_header';
 const WORKBOOK_ID = 'superset-univer';
 const SHEET_ID = 'data';
-// empty rows/columns left around the data so users have room to add formulas
-const EXTRA_ROWS = 20;
-const EXTRA_COLS = 5;
 // cell fields that hold the value, everything else (like style) is kept
 const DATA_KEYS = ['v', 't', 'f', 'si', 'p'];
 
 // pixel widths used to fit columns to their content in a fresh workbook
-const MIN_COL_WIDTH = 88;
+export const MIN_COL_WIDTH = 80;
 const MAX_COL_WIDTH = 320;
 const CHAR_WIDTH = 8;
 const COL_PADDING = 16;
 const WIDTH_SAMPLE_ROWS = 100;
+// Univer's defaults for the width of the 1, 2, 3… row header and of a column
+const ROW_HEADER_WIDTH = 46;
+const DEFAULT_COL_WIDTH = 88;
+// room for Univer's vertical scrollbar, which is drawn over the cells
+const SCROLLBAR_WIDTH = 12;
 
 export function parseSavedState(raw?: string | null): UniverSavedState | null {
   if (!raw) return null;
@@ -159,9 +161,121 @@ export function applyGrid(
     if (!Object.keys(row).length) delete cellData[r];
   }
 
-  sheet.rowCount = Math.max(sheet.rowCount ?? 0, rows + EXTRA_ROWS);
-  sheet.columnCount = Math.max(sheet.columnCount ?? 0, cols + EXTRA_COLS);
   return result;
+}
+
+/**
+ * Sizes the first sheet to its content (query result, formulas, styled
+ * cells) instead of an empty grid around it. Users add rows and columns
+ * themselves, empty ones they added are dropped the next time the chart loads.
+ */
+export function fitSheetSize(workbook: WorkbookData, grid: Grid): WorkbookData {
+  const sheetId = workbook.sheetOrder?.[0];
+  const sheet = sheetId ? workbook.sheets?.[sheetId] : undefined;
+  if (!sheetId || !sheet) return workbook;
+
+  let { rows, cols } = gridSize(grid);
+  Object.entries(sheet.cellData ?? {}).forEach(([r, row]) => {
+    Object.entries(row).forEach(([c, cell]) => {
+      if (!cell || !Object.keys(cell).length) return;
+      rows = Math.max(rows, Number(r) + 1);
+      cols = Math.max(cols, Number(c) + 1);
+    });
+  });
+  return {
+    ...workbook,
+    sheets: {
+      ...workbook.sheets,
+      [sheetId]: {
+        ...sheet,
+        rowCount: Math.max(rows, 1),
+        columnCount: Math.max(cols, 1),
+      },
+    },
+  };
+}
+
+/** Width of a column on the first sheet, when it has one set. */
+export function columnWidth(
+  workbook: WorkbookData,
+  column: number,
+): number | undefined {
+  const sheetId = workbook.sheetOrder?.[0];
+  return sheetId
+    ? workbook.sheets?.[sheetId]?.columnData?.[column]?.w
+    : undefined;
+}
+
+/** Column index to the width it had before stretching and the width given. */
+export type StretchedColumns = Record<number, { base: number; w: number }>;
+
+/**
+ * Widens the columns of the first sheet so together they fill `width`
+ * pixels, keeping their proportions. Columns that already overflow are left
+ * as they are, the sheet scrolls then.
+ */
+export function stretchColumns(
+  workbook: WorkbookData,
+  width: number,
+): { workbook: WorkbookData; stretched: StretchedColumns } {
+  const sheetId = workbook.sheetOrder?.[0];
+  const sheet = sheetId ? workbook.sheets?.[sheetId] : undefined;
+  const stretched: StretchedColumns = {};
+  if (!sheetId || !sheet) return { workbook, stretched };
+
+  const defaultWidth = sheet.defaultColumnWidth ?? DEFAULT_COL_WIDTH;
+  const columnData = { ...sheet.columnData };
+  const visible: number[] = [];
+  let total = 0;
+  for (let c = 0; c < (sheet.columnCount ?? 0); c += 1) {
+    if (!columnData[c]?.hd) {
+      visible.push(c);
+      total += columnData[c]?.w ?? defaultWidth;
+    }
+  }
+  const headerWidth = sheet.rowHeader?.hidden
+    ? 0
+    : (sheet.rowHeader?.width ?? ROW_HEADER_WIDTH);
+  const scale = (width - headerWidth - SCROLLBAR_WIDTH) / total;
+  if (!visible.length || !(scale > 1)) return { workbook, stretched };
+
+  visible.forEach(c => {
+    const base = columnData[c]?.w ?? defaultWidth;
+    // whole pixels, so the columns never add up to more than the view
+    const w = Math.floor(base * scale);
+    stretched[c] = { base, w };
+    columnData[c] = { ...columnData[c], w };
+  });
+  return {
+    workbook: {
+      ...workbook,
+      sheets: { ...workbook.sheets, [sheetId]: { ...sheet, columnData } },
+    },
+    stretched,
+  };
+}
+
+/**
+ * Undoes `stretchColumns` before saving, so the saved widths don't depend on
+ * the size of the view. A column resized by the user keeps its new width.
+ */
+export function unstretchColumns(
+  workbook: WorkbookData,
+  stretched: StretchedColumns,
+): WorkbookData {
+  const sheetId = workbook.sheetOrder?.[0];
+  const sheet = sheetId ? workbook.sheets?.[sheetId] : undefined;
+  if (!sheetId || !sheet?.columnData) return workbook;
+
+  const columnData = { ...sheet.columnData };
+  Object.entries(stretched).forEach(([c, { base, w }]) => {
+    const column = columnData[Number(c)];
+    if (column?.w === w) columnData[Number(c)] = { ...column, w: base };
+  });
+  return {
+    ...workbook,
+    sheets: { ...workbook.sheets, [sheetId]: { ...sheet, columnData } },
+  };
 }
 
 function fitColumnWidths(grid: Grid): Record<number, { w: number }> {
@@ -169,11 +283,12 @@ function fitColumnWidths(grid: Grid): Record<number, { w: number }> {
   const sample = grid.slice(0, WIDTH_SAMPLE_ROWS);
   for (let c = 0; c < gridSize(grid).cols; c += 1) {
     const chars = Math.max(...sample.map(row => String(row[c] ?? '').length));
-    const width = Math.min(
-      MAX_COL_WIDTH,
-      Math.max(MIN_COL_WIDTH, chars * CHAR_WIDTH + COL_PADDING),
-    );
-    if (width > MIN_COL_WIDTH) widths[c] = { w: width };
+    widths[c] = {
+      w: Math.min(
+        MAX_COL_WIDTH,
+        Math.max(MIN_COL_WIDTH, chars * CHAR_WIDTH + COL_PADDING),
+      ),
+    };
   }
   return widths;
 }
@@ -194,8 +309,9 @@ export function createWorkbookData(grid: Grid): WorkbookData {
         [SHEET_ID]: {
           id: SHEET_ID,
           name: 'Data',
-          rowCount: rows + EXTRA_ROWS,
-          columnCount: cols + EXTRA_COLS,
+          rowCount: rows,
+          columnCount: cols,
+          defaultColumnWidth: MIN_COL_WIDTH,
           // keep the header row visible while scrolling
           freeze: { xSplit: 0, ySplit: 1, startRow: 1, startColumn: 0 },
           columnData: fitColumnWidths(grid),
@@ -243,11 +359,16 @@ export function buildWorkbook(
 ): WorkbookData {
   if (!saved) return createWorkbookData(grid);
   // a stripped sheet has no values in the data area, they must come from the query
-  if (!liveData && !saved.stripped) return cloneDeep(saved.workbook);
-  return applyGrid(saved.workbook, grid, {
-    rows: saved.dataRows,
-    cols: saved.dataCols,
-  });
+  if (!liveData && !saved.stripped) {
+    return fitSheetSize(cloneDeep(saved.workbook), []);
+  }
+  return fitSheetSize(
+    applyGrid(saved.workbook, grid, {
+      rows: saved.dataRows,
+      cols: saved.dataCols,
+    }),
+    grid,
+  );
 }
 
 export function serializeState(

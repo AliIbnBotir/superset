@@ -56,6 +56,7 @@ export interface SheetData {
     startColumn: number;
   };
   cellData?: Record<number, Record<number, CellData>>;
+  defaultColumnWidth?: number;
   columnData?: Record<number, { w?: number; hd?: number }>;
   rowHeader?: { width: number; hidden?: number };
   columnHeader?: { height: number; hidden?: number };
@@ -83,6 +84,8 @@ export interface MountUniverOptions {
 
 export interface UniverHandle {
   save: () => WorkbookData;
+  /** column index to width in pixels, on the first sheet */
+  setColumnWidths: (widths: Record<number, number>) => void;
   dispose: () => void;
 }
 

@@ -86,6 +86,26 @@ export const mountUniver: MountUniver = ({
 
   return {
     save: () => workbook.save() as unknown as WorkbookData,
+    setColumnWidths: widths => {
+      const sheet = workbook.getSheets()[0];
+      const columns = Object.keys(widths).map(Number);
+      if (!sheet || !columns.length) return;
+      // a mutation rather than a command, so the change isn't on the undo
+      // stack and isn't blocked when the sheet is read-only
+      univerAPI.syncExecuteCommand('sheet.mutation.set-worksheet-col-width', {
+        unitId: workbook.getId(),
+        subUnitId: sheet.getSheetId(),
+        ranges: [
+          {
+            startRow: 0,
+            endRow: 0,
+            startColumn: Math.min(...columns),
+            endColumn: Math.max(...columns),
+          },
+        ],
+        colWidth: widths,
+      });
+    },
     dispose: () => {
       listener?.dispose();
       univer.dispose();

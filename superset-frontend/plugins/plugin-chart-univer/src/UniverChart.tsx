@@ -30,13 +30,19 @@ import { UniverChartProps, WORKBOOK_CONTROL } from './types';
 import {
   buildGrid,
   buildWorkbook,
+  columnWidth,
   hideHeaders,
   parseSavedState,
   serializeState,
+  StretchedColumns,
+  stretchColumns,
+  unstretchColumns,
 } from './utils/workbook';
 
 // wait for a burst of edits (typing, pasting, dragging) to finish before saving
 const SAVE_DELAY_MS = 300;
+// wait for the chart to stop resizing before widening the columns again
+const RESIZE_DELAY_MS = 100;
 
 const Container = styled.div<{ width: number; height: number }>`
   width: ${({ width }) => width}px;
@@ -88,6 +94,13 @@ export default function UniverChart(props: UniverChartProps) {
   const setControlValueRef = useRef(setControlValue);
   setControlValueRef.current = setControlValue;
 
+  // columns are widened to fill the chart, that is not saved (see
+  // unstretchColumns) so the sheet fits again at any other size
+  const widthRef = useRef(width);
+  widthRef.current = width;
+  const handleRef = useRef<UniverHandle | null>(null);
+  const stretchedRef = useRef<StretchedColumns>({});
+
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return undefined;
@@ -95,11 +108,17 @@ export default function UniverChart(props: UniverChartProps) {
     const saved = parseSavedState(latestStateRef.current);
     let workbookData = buildWorkbook(grid, saved, liveData);
     if (!editable && !showHeaders) workbookData = hideHeaders(workbookData);
+    const fitted = stretchColumns(workbookData, widthRef.current);
+    stretchedRef.current = fitted.stretched;
 
     let handle: UniverHandle | null = null;
     const save = debounce(() => {
       if (!handle) return;
-      const state = serializeState(handle.save(), grid, liveData);
+      const state = serializeState(
+        unstretchColumns(handle.save(), stretchedRef.current),
+        grid,
+        liveData,
+      );
       if (state === lastSavedRef.current || state === latestStateRef.current) {
         return;
       }
@@ -112,17 +131,46 @@ export default function UniverChart(props: UniverChartProps) {
 
     handle = (mountUniver as MountUniver)({
       container,
-      workbook: workbookData,
+      workbook: fitted.workbook,
       editable,
       onChange: editable ? save : undefined,
     });
+    handleRef.current = handle;
 
     return () => {
       // keep edits made just before the chart re-renders or Explore closes
       save.flush();
+      handleRef.current = null;
       handle?.dispose();
     };
   }, [grid, editable, liveData, showHeaders, externalVersion]);
+
+  useEffect(() => {
+    const restretch = debounce(() => {
+      const handle = handleRef.current;
+      if (!handle) return;
+      const current = handle.save();
+      const base = unstretchColumns(current, stretchedRef.current);
+      const { stretched } = stretchColumns(base, width);
+      const widths: Record<number, number> = {};
+      const columns = new Set([
+        ...Object.keys(stretchedRef.current),
+        ...Object.keys(stretched),
+      ]);
+      columns.forEach(key => {
+        const c = Number(key);
+        const target = stretched[c]?.w ?? columnWidth(base, c);
+        if (target !== undefined && target !== columnWidth(current, c)) {
+          widths[c] = target;
+        }
+      });
+      // set before the widths change, so saving sees them as stretched
+      stretchedRef.current = stretched;
+      if (Object.keys(widths).length) handle.setColumnWidths(widths);
+    }, RESIZE_DELAY_MS);
+    restretch();
+    return () => restretch.cancel();
+  }, [width]);
 
   return <Container ref={containerRef} width={width} height={height} />;
 }
