@@ -20,6 +20,7 @@ import { snakeCase, isEqual, cloneDeep } from 'lodash';
 import PropTypes from 'prop-types';
 import { createRef, Component } from 'react';
 import {
+  AppSection,
   SuperChart,
   logging,
   Behavior,
@@ -32,6 +33,8 @@ import {
 import { Logger, LOG_ACTIONS_RENDER_CHART } from 'src/logger/LogUtils';
 import { EmptyState } from '@superset-ui/core/components';
 import { ChartSource } from 'src/types/ChartSource';
+import { URL_PARAMS } from 'src/constants';
+import { getUrlParam } from 'src/utils/urlUtils';
 import ChartContextMenu from './ChartContextMenu/ChartContextMenu';
 
 const propTypes = {
@@ -132,6 +135,16 @@ class ChartRenderer extends Component {
     // the plugins, hence we need to clone it to avoid state mutation
     // until we change the reducers to use Redux Toolkit with Immer
     this.mutableQueriesResponse = cloneDeep(this.props.queriesResponse);
+  }
+
+  getAppSection() {
+    if (this.props.source === ChartSource.Dashboard) {
+      return AppSection.Dashboard;
+    }
+    // standalone Explore is used for embedded charts and report screenshots
+    return getUrlParam(URL_PARAMS.standalone)
+      ? AppSection.Embedded
+      : AppSection.Explore;
   }
 
   shouldComponentUpdate(nextProps, nextState) {
@@ -380,6 +393,7 @@ class ChartRenderer extends Component {
             noResults={noResultsComponent}
             postTransformProps={postTransformProps}
             emitCrossFilters={emitCrossFilters}
+            appSection={this.getAppSection()}
             legendState={this.state.legendState}
             enableNoResults={bypassNoResult}
             legendIndex={this.state.legendIndex}

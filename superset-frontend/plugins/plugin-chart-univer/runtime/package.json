@@ -1,0 +1,21 @@
+{
+  "name": "superset-univer-runtime",
+  "private": true,
+  "description": "Univer with its own React 18, bundled by build.mjs. Kept out of the Superset workspaces because Superset runs React 17.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "@univerjs/preset-sheets-core": "1.0.4",
+    "@univerjs/presets": "1.0.4",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.20.2",
+    "typescript": "5.4.5"
+  }
+}

@@ -1,0 +1,89 @@
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+/**
+ * Types shared by the chart (React 17, Superset) and the Univer runtime
+ * (React 18, bundled separately, see runtime/index.ts). They describe the
+ * parts of Univer's workbook format that the chart reads and writes, so the
+ * chart doesn't need Univer installed to type check.
+ */
+
+export type CellValue = string | number | boolean;
+
+/** Univer `ICellData` */
+export interface CellData {
+  /** value */
+  v?: CellValue | null;
+  /** style id or inline style */
+  s?: string | Record<string, unknown> | null;
+  /** formula */
+  f?: string | null;
+  /** shared formula id */
+  si?: string | null;
+  /** value type */
+  t?: number | null;
+  /** rich text */
+  p?: unknown;
+  [key: string]: unknown;
+}
+
+/** Univer `IWorksheetData` */
+export interface SheetData {
+  id?: string;
+  name?: string;
+  rowCount?: number;
+  columnCount?: number;
+  freeze?: {
+    xSplit: number;
+    ySplit: number;
+    startRow: number;
+    startColumn: number;
+  };
+  cellData?: Record<number, Record<number, CellData>>;
+  columnData?: Record<number, { w?: number; hd?: number }>;
+  rowHeader?: { width: number; hidden?: number };
+  columnHeader?: { height: number; hidden?: number };
+  [key: string]: unknown;
+}
+
+/** Univer `IWorkbookData` */
+export interface WorkbookData {
+  id?: string;
+  name?: string;
+  sheetOrder?: string[];
+  styles?: Record<string, unknown>;
+  sheets?: Record<string, SheetData>;
+  [key: string]: unknown;
+}
+
+export interface MountUniverOptions {
+  container: HTMLElement;
+  workbook: WorkbookData;
+  /** false hides toolbars, formula bar, sheet tabs and blocks edits */
+  editable: boolean;
+  /** called after every change to the document (not selection or scroll) */
+  onChange?: () => void;
+}
+
+export interface UniverHandle {
+  save: () => WorkbookData;
+  dispose: () => void;
+}
+
+export type MountUniver = (options: MountUniverOptions) => UniverHandle;

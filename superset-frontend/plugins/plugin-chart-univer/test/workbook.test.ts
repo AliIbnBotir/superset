@@ -1,0 +1,142 @@
+/**
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+import { GenericDataType } from '@superset-ui/core';
+import {
+  applyGrid,
+  buildGrid,
+  buildWorkbook,
+  createWorkbookData,
+  hideHeaders,
+  HEADER_STYLE_ID,
+  parseSavedState,
+  serializeState,
+  toCellValue,
+} from '../src/utils/workbook';
+
+const cells = (workbook: ReturnType<typeof createWorkbookData>) =>
+  workbook.sheets!.data.cellData!;
+
+const grid = buildGrid(
+  [
+    { name: 'a', total: 1 },
+    { name: 'b', total: 2 },
+  ],
+  ['name', 'total'],
+  [GenericDataType.String, GenericDataType.Numeric],
+  { total: 'Total' },
+);
+
+test('buildGrid adds a header row with verbose names', () => {
+  expect(grid).toEqual([
+    ['name', 'Total'],
+    ['a', 1],
+    ['b', 2],
+  ]);
+});
+
+test('toCellValue formats dates and keeps primitives', () => {
+  expect(toCellValue(Date.UTC(2024, 0, 31), GenericDataType.Temporal)).toBe(
+    '2024-01-31',
+  );
+  expect(
+    toCellValue(Date.UTC(2024, 0, 31, 13, 5, 9), GenericDataType.Temporal),
+  ).toBe('2024-01-31 13:05:09');
+  expect(toCellValue(null)).toBeNull();
+  expect(toCellValue(true)).toBe(true);
+  expect(toCellValue({ a: 1 })).toBe('{"a":1}');
+  expect(toCellValue(524.999999999985)).toBe(525);
+  expect(toCellValue(0.1 + 0.2)).toBe(0.3);
+  expect(toCellValue(42)).toBe(42);
+});
+
+test('createWorkbookData styles the header and freezes it', () => {
+  const workbook = createWorkbookData(grid);
+  expect(cells(workbook)[0][1]).toEqual({ v: 'Total', s: HEADER_STYLE_ID });
+  expect(cells(workbook)[2][1]).toEqual({ v: 2 });
+  expect(workbook.sheets!.data.freeze!.ySplit).toBe(1);
+});
+
+test('createWorkbookData widens columns with long content', () => {
+  const workbook = createWorkbookData([
+    ['SUM(global_sales)', 'n'],
+    ['x', 1],
+  ]);
+  expect(workbook.sheets!.data.columnData).toEqual({ 0: { w: 152 } });
+});
+
+test('applyGrid refreshes values, keeps styles and clears old cells', () => {
+  const workbook = createWorkbookData(grid);
+  cells(workbook)[1][0].s = 'red';
+  cells(workbook)[2][0].f = '=1+1';
+  cells(workbook)[0][5] = { v: 'my note' };
+
+  const smaller = applyGrid(workbook, [['name'], ['z']], { rows: 3, cols: 2 });
+  expect(cells(smaller)[1][0]).toEqual({ v: 'z', s: 'red' });
+  expect(cells(smaller)[2]).toBeUndefined();
+  expect(cells(smaller)[0][1]).toEqual({ s: HEADER_STYLE_ID });
+  expect(cells(smaller)[0][5]).toEqual({ v: 'my note' });
+  // the input is not modified
+  expect(cells(workbook)[2][0].v).toBe('b');
+});
+
+test('saved state round trip with live data strips query values', () => {
+  const workbook = createWorkbookData(grid);
+  cells(workbook)[0][3] = { f: '=SUM(B2:B3)', v: 3 };
+  const raw = serializeState(workbook, grid, true);
+  const saved = parseSavedState(raw)!;
+
+  expect(saved.stripped).toBe(true);
+  expect(cells(saved.workbook)[1]).toBeUndefined();
+  expect(cells(saved.workbook)[0][3]).toEqual({ f: '=SUM(B2:B3)', v: 3 });
+
+  const newGrid = [
+    ['name', 'Total'],
+    ['x', 10],
+  ];
+  const restored = buildWorkbook(newGrid, saved, true);
+  expect(cells(restored)[1]).toEqual({ 0: { v: 'x' }, 1: { v: 10 } });
+  expect(cells(restored)[0][3].f).toBe('=SUM(B2:B3)');
+});
+
+test('without live data the saved sheet is used as is', () => {
+  const workbook = createWorkbookData(grid);
+  cells(workbook)[1][0].v = 'edited';
+  const saved = parseSavedState(serializeState(workbook, grid, false))!;
+  const restored = buildWorkbook([['name'], ['fresh']], saved, false);
+  expect(cells(restored)[1][0].v).toBe('edited');
+});
+
+test('a stripped sheet gets data even when live data is off', () => {
+  const saved = parseSavedState(
+    serializeState(createWorkbookData(grid), grid, true),
+  )!;
+  expect(cells(buildWorkbook(grid, saved, false))[1][0].v).toBe('a');
+});
+
+test('parseSavedState rejects broken values', () => {
+  expect(parseSavedState(null)).toBeNull();
+  expect(parseSavedState('not json')).toBeNull();
+  expect(parseSavedState('{"version":2}')).toBeNull();
+});
+
+test('hideHeaders hides row and column headers', () => {
+  const sheet = hideHeaders(createWorkbookData(grid)).sheets!.data;
+  expect(sheet.rowHeader!.hidden).toBe(1);
+  expect(sheet.columnHeader!.hidden).toBe(1);
+});
