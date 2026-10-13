@@ -202,3 +202,11 @@ test('a renamed header is saved and kept with live data', () => {
   const other = buildWorkbook([['platform', 'Total']], saved, true);
   expect(cells(other)[0][0].v).toBe('platform');
 });
+
+test('stretchColumns adds up to exactly the width', () => {
+  const workbook = createWorkbookData([['a', 'b', 'c']]);
+  const { workbook: wide } = stretchColumns(workbook, 1000);
+  const widths = Object.values(wide.sheets!.data.columnData!).map(c => c.w!);
+  expect(widths).toEqual([314, 314, 314]);
+  expect(widths.reduce((a, b) => a + b)).toBe(1000 - 46 - 12);
+});

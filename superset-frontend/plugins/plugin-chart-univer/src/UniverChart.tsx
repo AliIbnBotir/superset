@@ -31,6 +31,7 @@ import {
   buildGrid,
   buildWorkbook,
   columnWidth,
+  fillWidth,
   hideHeaders,
   parseSavedState,
   serializeState,
@@ -134,6 +135,7 @@ export default function UniverChart(props: UniverChartProps) {
       workbook: fitted.workbook,
       editable,
       onChange: editable ? save : undefined,
+      getFillWidth: () => fillWidth(fitted.workbook, widthRef.current),
     });
     handleRef.current = handle;
 

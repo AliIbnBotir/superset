@@ -212,6 +212,18 @@ export function columnWidth(
     : undefined;
 }
 
+/**
+ * Width the columns of the first sheet have to take up together to fill a
+ * chart `width` pixels wide.
+ */
+export function fillWidth(workbook: WorkbookData, width: number): number {
+  const sheet = workbook.sheets?.[workbook.sheetOrder?.[0] ?? ''];
+  const headerWidth = sheet?.rowHeader?.hidden
+    ? 0
+    : (sheet?.rowHeader?.width ?? ROW_HEADER_WIDTH);
+  return width - headerWidth - SCROLLBAR_WIDTH;
+}
+
 /** Column index to the width it had before stretching and the width given. */
 export type StretchedColumns = Record<number, { base: number; w: number }>;
 
@@ -239,16 +251,17 @@ export function stretchColumns(
       total += columnData[c]?.w ?? defaultWidth;
     }
   }
-  const headerWidth = sheet.rowHeader?.hidden
-    ? 0
-    : (sheet.rowHeader?.width ?? ROW_HEADER_WIDTH);
-  const scale = (width - headerWidth - SCROLLBAR_WIDTH) / total;
+  const available = Math.floor(fillWidth(workbook, width));
+  const scale = available / total;
   if (!visible.length || !(scale > 1)) return { workbook, stretched };
 
-  visible.forEach(c => {
+  let left = available;
+  visible.forEach((c, i) => {
     const base = columnData[c]?.w ?? defaultWidth;
-    // whole pixels, so the columns never add up to more than the view
-    const w = Math.floor(base * scale);
+    // whole pixels, the last column takes what rounding left over so the
+    // columns add up to exactly the view
+    const w = i === visible.length - 1 ? left : Math.floor(base * scale);
+    left -= w;
     stretched[c] = { base, w };
     columnData[c] = { ...columnData[c], w };
   });

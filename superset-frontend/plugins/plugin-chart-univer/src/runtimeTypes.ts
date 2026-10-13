@@ -80,6 +80,11 @@ export interface MountUniverOptions {
   editable: boolean;
   /** called after every change to the document (not selection or scroll) */
   onChange?: () => void;
+  /**
+   * Width in pixels the columns of the sheet should take up together. When
+   * set, the column menu gets a "Fill the window" item while they take up less.
+   */
+  getFillWidth?: () => number;
 }
 
 export interface UniverHandle {

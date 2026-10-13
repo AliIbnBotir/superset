@@ -26,15 +26,21 @@
 import {
   CommandType,
   createUniver,
+  ICommandService,
   ICommandInfo,
   IWorkbookData,
   LocaleType,
   mergeLocales,
 } from '@univerjs/presets';
 import {
+  ContextMenuGroup,
+  ContextMenuPosition,
   FWorkbook,
+  IMenuManagerService,
+  MenuItemType,
   UniverSheetsCorePreset,
 } from '@univerjs/preset-sheets-core';
+import { Observable } from 'rxjs';
 import UniverPresetSheetsCoreEnUS from '@univerjs/preset-sheets-core/locales/en-US';
 import '@univerjs/preset-sheets-core/lib/index.css';
 import type { MountUniver, WorkbookData } from '../src/runtimeTypes';
@@ -44,6 +50,7 @@ export const mountUniver: MountUniver = ({
   workbook: workbookData,
   editable,
   onChange,
+  getFillWidth,
 }) => {
   const { univer, univerAPI } = createUniver({
     locale: LocaleType.EN_US,
@@ -69,6 +76,60 @@ export const mountUniver: MountUniver = ({
     workbookData as Partial<IWorkbookData>,
   );
   if (!editable) workbook.setEditable(false);
+
+  // "Fill the window" in the column header menu, after "Fit for data": widens
+  // the selected columns to take up the empty space right of the last column
+  const freeWidth = () => {
+    const sheet = workbook.getActiveSheet();
+    const columns = sheet.getSheet();
+    let used = 0;
+    for (let c = 0; c < sheet.getMaxColumns(); c += 1) {
+      if (columns.getColVisible(c)) used += sheet.getColumnWidth(c);
+    }
+    return Math.floor((getFillWidth?.() ?? 0) - used);
+  };
+  if (editable && getFillWidth) {
+    // the facade's createMenu can't hide an item, so use the services directly
+    // eslint-disable-next-line no-underscore-dangle
+    const injector = univer.__getInjector();
+    const commandId = 'superset.command.fill-window-col-width';
+    injector.get(ICommandService).registerCommand({
+      id: commandId,
+      type: CommandType.COMMAND,
+      handler: () => {
+        const sheet = workbook.getActiveSheet();
+        const range = workbook.getActiveRange()?.getRange();
+        const free = freeWidth();
+        if (!range || free < 1) return false;
+        const count = range.endColumn - range.startColumn + 1;
+        const extra = Math.floor(free / count);
+        for (let c = range.startColumn; c <= range.endColumn; c += 1) {
+          sheet.setColumnWidths(c, 1, sheet.getColumnWidth(c) + extra);
+        }
+        return true;
+      },
+    });
+    injector.get(IMenuManagerService).mergeMenu({
+      [ContextMenuPosition.COL_HEADER]: {
+        [ContextMenuGroup.LAYOUT]: {
+          [commandId]: {
+            // "Fit for data" is 4, "Freeze" 5
+            order: 4.5,
+            menuItemFactory: () => ({
+              id: commandId,
+              type: MenuItemType.BUTTON,
+              icon: 'AutoWidthDoubleIcon',
+              title: 'Fill the window',
+              // checked each time the menu opens
+              hidden$: new Observable<boolean>(subscriber => {
+                subscriber.next(freeWidth() < 1);
+              }),
+            }),
+          },
+        },
+      },
+    });
+  }
 
   const listener =
     editable && onChange
