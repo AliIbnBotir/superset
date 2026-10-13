@@ -183,3 +183,22 @@ test('hideHeaders hides row and column headers', () => {
   expect(sheet.rowHeader!.hidden).toBe(1);
   expect(sheet.columnHeader!.hidden).toBe(1);
 });
+
+test('a renamed header is saved and kept with live data', () => {
+  const workbook = createWorkbookData(grid);
+  cells(workbook)[0][0].v = 'Genre';
+  const raw = serializeState(workbook, grid, true);
+  expect(raw).not.toBe(serializeState(createWorkbookData(grid), grid, true));
+
+  const saved = parseSavedState(raw)!;
+  expect(cells(saved.workbook)[0][0]).toEqual({
+    v: 'Genre',
+    s: HEADER_STYLE_ID,
+  });
+  expect(cells(saved.workbook)[0][1]).toEqual({ s: HEADER_STYLE_ID });
+  expect(cells(buildWorkbook(grid, saved, true))[0][0].v).toBe('Genre');
+
+  // the query now returns another column there, so its label is shown
+  const other = buildWorkbook([['platform', 'Total']], saved, true);
+  expect(cells(other)[0][0].v).toBe('platform');
+});

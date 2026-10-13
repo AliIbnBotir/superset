@@ -31,6 +31,12 @@ export interface UniverSavedState {
   dataCols: number;
   /** true when query values were left out of `workbook` to save space */
   stripped: boolean;
+  /**
+   * The query's column labels when it was saved. A header cell in a stripped
+   * workbook that still has a value is one the user renamed, it is kept while
+   * the query's label for that column stays the same.
+   */
+  headers?: (CellValue | null)[];
   workbook: WorkbookData;
 }
 
@@ -327,14 +333,24 @@ export function createWorkbookData(grid: Grid): WorkbookData {
 /**
  * Removes query values from the data area before saving. They are filled in
  * again from fresh query results when the chart loads, which keeps the saved
- * chart small. Formatting of those cells is kept.
+ * chart small. Formatting of those cells is kept, and so are headers the user
+ * renamed.
  */
-export function stripGrid(
-  workbook: WorkbookData,
-  rows: number,
-  cols: number,
-): WorkbookData {
-  return applyGrid(workbook, [], { rows, cols });
+export function stripGrid(workbook: WorkbookData, grid: Grid): WorkbookData {
+  const { rows, cols } = gridSize(grid);
+  const result = applyGrid(workbook, [], { rows, cols });
+  const sheetId = workbook.sheetOrder?.[0];
+  const header = sheetId ? workbook.sheets?.[sheetId]?.cellData?.[0] : null;
+  const cellData = sheetId ? result.sheets?.[sheetId]?.cellData : null;
+  if (!header || !cellData) return result;
+
+  for (let c = 0; c < cols; c += 1) {
+    const value = header[c]?.v;
+    if (value !== undefined && value !== null && value !== grid[0][c]) {
+      cellData[0] = { ...cellData[0], [c]: { ...cellData[0]?.[c], v: value } };
+    }
+  }
+  return result;
 }
 
 /** Hides the A, B, C… and 1, 2, 3… headers on every sheet. */
@@ -362,8 +378,18 @@ export function buildWorkbook(
   if (!liveData && !saved.stripped) {
     return fitSheetSize(cloneDeep(saved.workbook), []);
   }
+  // the query's labels go in as is, except where the user renamed a column
+  const renamed =
+    saved.workbook.sheets?.[saved.workbook.sheetOrder?.[0] ?? '']
+      ?.cellData?.[0];
+  const headers = (grid[0] ?? []).map((label, c) => {
+    const value = renamed?.[c]?.v;
+    return value !== undefined && value !== null && saved.headers?.[c] === label
+      ? value
+      : label;
+  });
   return fitSheetSize(
-    applyGrid(saved.workbook, grid, {
+    applyGrid(saved.workbook, [headers, ...grid.slice(1)], {
       rows: saved.dataRows,
       cols: saved.dataCols,
     }),
@@ -382,7 +408,8 @@ export function serializeState(
     dataRows: rows,
     dataCols: cols,
     stripped: liveData,
-    workbook: liveData ? stripGrid(workbook, rows, cols) : workbook,
+    headers: grid[0] ?? [],
+    workbook: liveData ? stripGrid(workbook, grid) : workbook,
   };
   return JSON.stringify(state);
 }
