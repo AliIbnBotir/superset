@@ -16,8 +16,9 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import { AppSection, ChartProps } from '@superset-ui/core';
+import { AppSection, ChartProps, ensureIsArray } from '@superset-ui/core';
 import { UniverChartProps, UniverQueryFormData } from '../types';
+import { PIVOT_MODE } from './controls/shared';
 
 export default function transformProps(
   chartProps: ChartProps,
@@ -39,5 +40,9 @@ export default function transformProps(
     liveData: formData.univer_live_data ?? true,
     showHeaders: formData.univer_show_headers ?? false,
     setControlValue: hooks?.setControlValue,
+    pivotRows:
+      formData.query_mode === PIVOT_MODE
+        ? ensureIsArray(formData.univer_pivot_rows).length
+        : undefined,
   };
 }

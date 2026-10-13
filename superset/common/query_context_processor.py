@@ -1005,9 +1005,13 @@ class QueryContextProcessor:
             elif self._query_context.result_format == ChartDataResultFormat.XLSX:
                 form_data = self._query_context.form_data
                 if univer_excel.is_univer_chart(form_data):
-                    # the spreadsheet chart exports the sheet with the user's edits
+                    # the spreadsheet chart exports the sheet with the user's
+                    # edits, it labels the columns itself
                     result = univer_excel.df_to_univer_excel(
-                        df, coltypes, form_data or {}
+                        df.set_axis(columns, axis=1),
+                        coltypes,
+                        form_data or {},
+                        verbose_map,
                     )
                 else:
                     excel.apply_column_types(df, coltypes)

@@ -24,8 +24,10 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from superset.utils import json
 from superset.utils.core import GenericDataType
+from superset.utils.pandas_postprocessing import flatten, pivot
 from superset.utils.univer_excel import (
     build_grid,
+    build_pivot_grid,
     df_to_univer_excel,
     is_univer_chart,
     to_cell_value,
@@ -181,3 +183,72 @@ def test_export_without_live_data_uses_saved_values() -> None:
         }
     ).active
     assert ws["A2"].value == "edited"
+
+
+def test_build_pivot_grid() -> None:
+    df = pd.DataFrame(
+        {
+            "genre": ["Action", "Total"],
+            "count, PS4": [1, 1],
+            "count, Wii\\, U": [2, 2],
+        }
+    )
+    grid, layout = build_pivot_grid(
+        df,
+        [GenericDataType.STRING, GenericDataType.NUMERIC, GenericDataType.NUMERIC],
+        {"genre": "Genre", "count": "COUNT(*)"},
+        1,
+    )
+    assert grid == [
+        ["Genre", "COUNT(*)", "COUNT(*)"],
+        [None, "PS4", "Wii, U"],
+        ["Action", 1, 2],
+        ["Total", 1, 2],
+    ]
+    assert layout == {
+        "headerRows": 2,
+        "frozenCols": 1,
+        "merges": [
+            {"startRow": 0, "endRow": 1, "startColumn": 0, "endColumn": 0},
+            {"startRow": 0, "endRow": 0, "startColumn": 1, "endColumn": 2},
+        ],
+    }
+
+
+def test_export_pivot() -> None:
+    data = pd.DataFrame(
+        {
+            "genre": ["Action", "Action", "Puzzle"],
+            "platform": ["PS4", "Wii", "PS4"],
+            "count": [1, 2, 3],
+        }
+    )
+    df = flatten(
+        pivot(
+            data,
+            index=["genre"],
+            columns=["platform"],
+            aggregates={"count": {"operator": "sum"}},
+            marginal_distributions=True,
+            marginal_distribution_name="Total",
+        )
+    )
+    contents = df_to_univer_excel(
+        df,
+        [GenericDataType.STRING] + [GenericDataType.NUMERIC] * 3,
+        {
+            "viz_type": "univer_sheet",
+            "query_mode": "pivot",
+            "univer_pivot_rows": ["genre"],
+        },
+    )
+    ws = load_workbook(io.BytesIO(contents)).active
+    assert values(ws) == [
+        ["genre", "count", None, None],
+        [None, "PS4", "Wii", "Total"],
+        ["Action", 1, 2, 3],
+        ["Puzzle", 3, None, 3],
+        ["Total", 4, 2, 6],
+    ]
+    assert {str(merge) for merge in ws.merged_cells.ranges} == {"A1:A2", "B1:D1"}
+    assert ws.freeze_panes == "B3"

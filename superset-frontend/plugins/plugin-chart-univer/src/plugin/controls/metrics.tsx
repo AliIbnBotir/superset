@@ -24,13 +24,21 @@ import {
   ColumnMeta,
   defineSavedMetrics,
 } from '@superset-ui/chart-controls';
-import { isAggMode, validateAggControlValues } from './shared';
+import { ensureIsArray, t } from '@superset-ui/core';
+import {
+  isAggOrPivotMode,
+  isPivotMode,
+  validateAggControlValues,
+} from './shared';
+
+const validatePivotMetrics = (value: unknown) =>
+  ensureIsArray(value).length ? [] : [t('Pivot needs at least one metric')];
 
 export const metricsControlSetItem: ControlSetItem = {
   name: 'metrics',
   override: {
     validators: [],
-    visibility: isAggMode,
+    visibility: isAggOrPivotMode,
     mapStateToProps: (
       { controls, datasource, form_data }: ControlPanelState,
       controlState: ControlState,
@@ -45,10 +53,12 @@ export const metricsControlSetItem: ControlSetItem = {
       selectedMetrics:
         form_data.metrics || (form_data.metric ? [form_data.metric] : []),
       datasource,
-      externalValidationErrors: validateAggControlValues(controls, [
-        controls.groupby?.value,
-        controlState.value,
-      ]),
+      externalValidationErrors: isPivotMode({ controls })
+        ? validatePivotMetrics(controlState.value)
+        : validateAggControlValues(controls, [
+            controls.groupby?.value,
+            controlState.value,
+          ]),
     }),
     rerender: ['groupby'],
     resetOnHide: false,

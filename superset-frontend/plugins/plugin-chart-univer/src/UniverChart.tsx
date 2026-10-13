@@ -29,7 +29,9 @@ import { MountUniver, UniverHandle } from './runtimeTypes';
 import { UniverChartProps, WORKBOOK_CONTROL } from './types';
 import {
   buildGrid,
+  buildPivotGrid,
   buildWorkbook,
+  DEFAULT_LAYOUT,
   columnWidth,
   fillWidth,
   hideHeaders,
@@ -64,15 +66,28 @@ export default function UniverChart(props: UniverChartProps) {
     liveData,
     showHeaders,
     setControlValue,
+    pivotRows,
   } = props;
   const containerRef = useRef<HTMLDivElement>(null);
 
   // `labels` is a new object on every render, compare it by content so that
   // saving an edit doesn't rebuild the whole spreadsheet
   const labelsKey = JSON.stringify(labels);
-  const grid = useMemo(
-    () => buildGrid(data, colnames, coltypes, JSON.parse(labelsKey)),
-    [data, colnames, coltypes, labelsKey],
+  const { grid, layout } = useMemo(
+    () =>
+      pivotRows
+        ? buildPivotGrid(
+            data,
+            colnames,
+            coltypes,
+            JSON.parse(labelsKey),
+            pivotRows,
+          )
+        : {
+            grid: buildGrid(data, colnames, coltypes, JSON.parse(labelsKey)),
+            layout: DEFAULT_LAYOUT,
+          },
+    [data, colnames, coltypes, labelsKey, pivotRows],
   );
 
   // The saved state changes in two ways: the chart saved an edit (the sheet on
@@ -107,7 +122,7 @@ export default function UniverChart(props: UniverChartProps) {
     if (!container) return undefined;
 
     const saved = parseSavedState(latestStateRef.current);
-    let workbookData = buildWorkbook(grid, saved, liveData);
+    let workbookData = buildWorkbook(grid, saved, liveData, layout);
     if (!editable && !showHeaders) workbookData = hideHeaders(workbookData);
     const fitted = stretchColumns(workbookData, widthRef.current);
     stretchedRef.current = fitted.stretched;
@@ -119,6 +134,7 @@ export default function UniverChart(props: UniverChartProps) {
         unstretchColumns(handle.save(), stretchedRef.current),
         grid,
         liveData,
+        layout,
       );
       if (state === lastSavedRef.current || state === latestStateRef.current) {
         return;
@@ -145,7 +161,7 @@ export default function UniverChart(props: UniverChartProps) {
       handleRef.current = null;
       handle?.dispose();
     };
-  }, [grid, editable, liveData, showHeaders, externalVersion]);
+  }, [grid, layout, editable, liveData, showHeaders, externalVersion]);
 
   useEffect(() => {
     const restretch = debounce(() => {

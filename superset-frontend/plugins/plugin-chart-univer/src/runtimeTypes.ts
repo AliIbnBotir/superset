@@ -43,6 +43,14 @@ export interface CellData {
   [key: string]: unknown;
 }
 
+/** Univer `IRange`, a block of merged cells */
+export interface MergeRange {
+  startRow: number;
+  endRow: number;
+  startColumn: number;
+  endColumn: number;
+}
+
 /** Univer `IWorksheetData` */
 export interface SheetData {
   id?: string;
@@ -56,6 +64,7 @@ export interface SheetData {
     startColumn: number;
   };
   cellData?: Record<number, Record<number, CellData>>;
+  mergeData?: MergeRange[];
   defaultColumnWidth?: number;
   columnData?: Record<number, { w?: number; hd?: number }>;
   rowHeader?: { width: number; hidden?: number };

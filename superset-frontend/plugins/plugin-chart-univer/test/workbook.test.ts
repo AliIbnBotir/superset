@@ -20,6 +20,7 @@ import { GenericDataType } from '@superset-ui/core';
 import {
   applyGrid,
   buildGrid,
+  buildPivotGrid,
   buildWorkbook,
   createWorkbookData,
   fitSheetSize,
@@ -209,4 +210,59 @@ test('stretchColumns adds up to exactly the width', () => {
   const widths = Object.values(wide.sheets!.data.columnData!).map(c => c.w!);
   expect(widths).toEqual([314, 314, 314]);
   expect(widths.reduce((a, b) => a + b)).toBe(1000 - 46 - 12);
+});
+
+test('buildPivotGrid stacks and merges the pivot headers', () => {
+  const { grid: pivot, layout } = buildPivotGrid(
+    [
+      { genre: 'Action', 'SUM(sales), PS4': 1, 'SUM(sales), Wii\\, U': 2 },
+      { genre: 'Total', 'SUM(sales), PS4': 1, 'SUM(sales), Wii\\, U': 2 },
+    ],
+    ['genre', 'SUM(sales), PS4', 'SUM(sales), Wii\\, U'],
+    [GenericDataType.String, GenericDataType.Numeric, GenericDataType.Numeric],
+    { genre: 'Genre' },
+    1,
+  );
+  expect(pivot).toEqual([
+    ['Genre', 'SUM(sales)', 'SUM(sales)'],
+    [null, 'PS4', 'Wii, U'],
+    ['Action', 1, 2],
+    ['Total', 1, 2],
+  ]);
+  expect(layout).toEqual({
+    headerRows: 2,
+    frozenCols: 1,
+    merges: [
+      { startRow: 0, endRow: 1, startColumn: 0, endColumn: 0 },
+      { startRow: 0, endRow: 0, startColumn: 1, endColumn: 2 },
+    ],
+  });
+
+  const workbook = createWorkbookData(pivot, layout);
+  const sheet = workbook.sheets!.data;
+  expect(sheet.freeze).toMatchObject({ xSplit: 1, ySplit: 2 });
+  expect(sheet.mergeData).toEqual(layout.merges);
+  expect(cells(workbook)[1][1].s).toBe(HEADER_STYLE_ID);
+
+  // a renamed lower header survives a refresh
+  cells(workbook)[1][1].v = 'PlayStation';
+  const saved = parseSavedState(serializeState(workbook, pivot, true, layout))!;
+  const restored = buildWorkbook(pivot, saved, true, layout);
+  expect(cells(restored)[1][1].v).toBe('PlayStation');
+  expect(restored.sheets!.data.mergeData).toEqual(layout.merges);
+});
+
+test('buildPivotGrid without column fields has one header row', () => {
+  const { grid: pivot, layout } = buildPivotGrid(
+    [{ genre: 'Action', 'SUM(sales)': 1 }],
+    ['genre', 'SUM(sales)'],
+    [GenericDataType.String, GenericDataType.Numeric],
+    {},
+    1,
+  );
+  expect(pivot).toEqual([
+    ['genre', 'SUM(sales)'],
+    ['Action', 1],
+  ]);
+  expect(layout).toEqual({ headerRows: 1, frozenCols: 1, merges: [] });
 });

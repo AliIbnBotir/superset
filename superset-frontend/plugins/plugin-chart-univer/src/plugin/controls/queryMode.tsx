@@ -22,7 +22,7 @@ import {
   QueryModeLabel,
 } from '@superset-ui/chart-controls';
 import { QueryMode, t } from '@superset-ui/core';
-import { getQueryMode } from './shared';
+import { getQueryMode, PIVOT_MODE } from './shared';
 
 const queryMode: ControlConfig<'RadioButtonControl'> = {
   type: 'RadioButtonControl',
@@ -31,9 +31,16 @@ const queryMode: ControlConfig<'RadioButtonControl'> = {
   options: [
     [QueryMode.Aggregate, QueryModeLabel[QueryMode.Aggregate]],
     [QueryMode.Raw, QueryModeLabel[QueryMode.Raw]],
+    [PIVOT_MODE, t('Pivot')],
   ],
   mapStateToProps: ({ controls }) => ({ value: getQueryMode(controls) }),
-  rerender: ['all_columns', 'groupby', 'metrics'],
+  rerender: [
+    'all_columns',
+    'groupby',
+    'metrics',
+    'univer_pivot_rows',
+    'univer_pivot_columns',
+  ],
 };
 
 export const queryModeControlSetItem: ControlSetItem = {

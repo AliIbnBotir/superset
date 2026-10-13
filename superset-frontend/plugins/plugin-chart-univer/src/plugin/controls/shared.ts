@@ -27,10 +27,19 @@ import {
   t,
 } from '@superset-ui/core';
 
-export function getQueryMode(controls: ControlStateMapping): QueryMode {
+/** Pivot mode: the query result pivoted on the backend, see buildQuery */
+export const PIVOT_MODE = 'pivot';
+
+export type UniverQueryMode = QueryMode | typeof PIVOT_MODE;
+
+export function getQueryMode(controls: ControlStateMapping): UniverQueryMode {
   const mode = controls?.query_mode?.value;
-  if (mode === QueryMode.Aggregate || mode === QueryMode.Raw) {
-    return mode as QueryMode;
+  if (
+    mode === QueryMode.Aggregate ||
+    mode === QueryMode.Raw ||
+    mode === PIVOT_MODE
+  ) {
+    return mode as UniverQueryMode;
   }
   const rawColumns = controls?.all_columns?.value as
     | QueryFormColumn[]
@@ -42,13 +51,18 @@ export function getQueryMode(controls: ControlStateMapping): QueryMode {
 /**
  * Visibility check
  */
-export function isQueryMode(mode: QueryMode) {
+export function isQueryMode(mode: UniverQueryMode) {
   return ({ controls }: Pick<ControlPanelsContainerProps, 'controls'>) =>
     getQueryMode(controls) === mode;
 }
 
 export const isAggMode = isQueryMode(QueryMode.Aggregate);
 export const isRawMode = isQueryMode(QueryMode.Raw);
+export const isPivotMode = isQueryMode(PIVOT_MODE);
+export const isAggOrPivotMode = ({
+  controls,
+}: Pick<ControlPanelsContainerProps, 'controls'>) =>
+  isAggMode({ controls }) || isPivotMode({ controls });
 
 export const validateAggControlValues = (
   controls: ControlStateMapping,

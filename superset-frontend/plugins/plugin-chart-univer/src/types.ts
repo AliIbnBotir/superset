@@ -20,6 +20,7 @@ import {
   DataRecord,
   GenericDataType,
   HandlerFunction,
+  QueryFormColumn,
   QueryFormData,
 } from '@superset-ui/core';
 
@@ -30,6 +31,9 @@ export type UniverQueryFormData = QueryFormData & {
   univer_workbook?: string | null;
   univer_live_data?: boolean;
   univer_show_headers?: boolean;
+  univer_pivot_rows?: QueryFormColumn[];
+  univer_pivot_columns?: QueryFormColumn[];
+  univer_pivot_totals?: boolean;
 };
 
 export interface UniverChartProps {
@@ -45,5 +49,10 @@ export interface UniverChartProps {
   savedState: string | null;
   liveData: boolean;
   showHeaders: boolean;
+  /**
+   * In pivot mode, the number of row fields: the query result's first
+   * columns. The other columns hold the values, see `buildPivotGrid`.
+   */
+  pivotRows?: number;
   setControlValue?: HandlerFunction;
 }

@@ -18,10 +18,32 @@
  */
 import { cloneDeep, omit } from 'lodash';
 import { DataRecord, GenericDataType } from '@superset-ui/core';
-import { CellData, CellValue, WorkbookData } from '../runtimeTypes';
+import {
+  CellData,
+  CellValue,
+  MergeRange,
+  SheetData,
+  WorkbookData,
+} from '../runtimeTypes';
 
-/** Query result as a grid: the header row followed by the data rows. */
+/** Query result as a grid: the header rows followed by the data rows. */
 export type Grid = (CellValue | null)[][];
+
+/** How the query result is laid out in the grid. */
+export interface GridLayout {
+  /** header rows on top: 1, or one per pivot level */
+  headerRows: number;
+  /** columns frozen on the left: the pivot's row fields */
+  frozenCols: number;
+  /** merged header cells */
+  merges: MergeRange[];
+}
+
+export const DEFAULT_LAYOUT: GridLayout = {
+  headerRows: 1,
+  frozenCols: 0,
+  merges: [],
+};
 
 /** What the chart stores in `form_data.univer_workbook` (as a JSON string). */
 export interface UniverSavedState {
@@ -37,6 +59,10 @@ export interface UniverSavedState {
    * the query's label for that column stays the same.
    */
   headers?: (CellValue | null)[];
+  /** like `headers`, for every header row */
+  headerGrid?: (CellValue | null)[][];
+  /** layout of the query result when it was saved */
+  layout?: GridLayout;
   workbook: WorkbookData;
 }
 
@@ -129,6 +155,136 @@ function gridSize(grid: Grid) {
   return { rows: grid.length, cols: grid[0]?.length ?? 0 };
 }
 
+// splits a column name of a flattened pivot ("SUM(sales), Action") into its
+// levels; commas inside a level are escaped as "\,"
+function splitFlatName(name: string): string[] {
+  return name.split(/(?<!\\), /).map(part => part.replace(/\\,/g, ','));
+}
+
+/**
+ * Lays out a pivoted query result: the first `rowFields` columns are the
+ * pivot's row fields, the other columns are named "metric, value, …" by
+ * Superset's `flatten`. Each level gets a header row, with equal neighbouring
+ * headers merged. The row fields' names go in the top header row, merged
+ * down over the others. Row fields and metrics are shown with their `labels`
+ * (verbose names).
+ */
+export function buildPivotGrid(
+  data: DataRecord[],
+  colnames: string[],
+  coltypes: GenericDataType[],
+  labels: Record<string, string>,
+  rowFields: number,
+): { grid: Grid; layout: GridLayout } {
+  const levels = colnames.slice(rowFields).map(name => splitFlatName(name));
+  const headerRows = Math.max(1, ...levels.map(parts => parts.length));
+  const header: Grid = Array.from({ length: headerRows }, (_, r) =>
+    colnames.map((col, c) => {
+      if (c < rowFields) {
+        return r === 0 ? (labels[col] ?? col) : null;
+      }
+      const value = levels[c - rowFields][r];
+      if (value === undefined || value === '') return null;
+      // the top level is the metric
+      return r === 0 ? (labels[value] ?? value) : value;
+    }),
+  );
+
+  const merges: MergeRange[] = [];
+  if (headerRows > 1) {
+    for (let c = 0; c < rowFields; c += 1) {
+      merges.push({
+        startRow: 0,
+        endRow: headerRows - 1,
+        startColumn: c,
+        endColumn: c,
+      });
+    }
+  }
+  // a header spans the columns below it that share all levels above
+  for (let r = 0; r < headerRows - 1; r += 1) {
+    let start = rowFields;
+    for (let c = rowFields + 1; c <= colnames.length; c += 1) {
+      const same =
+        c < colnames.length &&
+        levels[c - rowFields].slice(0, r + 1).join('\u0000') ===
+          levels[start - rowFields].slice(0, r + 1).join('\u0000');
+      if (!same) {
+        if (c - 1 > start && header[r][start] !== null) {
+          merges.push({
+            startRow: r,
+            endRow: r,
+            startColumn: start,
+            endColumn: c - 1,
+          });
+        }
+        start = c;
+      }
+    }
+  }
+
+  return {
+    grid: [
+      ...header,
+      ...data.map(row =>
+        colnames.map((col, i) => toCellValue(row[col], coltypes[i])),
+      ),
+    ],
+    layout: { headerRows, frozenCols: rowFields, merges },
+  };
+}
+
+function firstSheet(workbook: WorkbookData): SheetData | undefined {
+  const sheetId = workbook.sheetOrder?.[0];
+  return sheetId ? workbook.sheets?.[sheetId] : undefined;
+}
+
+function sameRange(a: MergeRange, b: MergeRange) {
+  return (
+    a.startRow === b.startRow &&
+    a.endRow === b.endRow &&
+    a.startColumn === b.startColumn &&
+    a.endColumn === b.endColumn
+  );
+}
+
+function layoutFreeze(layout: GridLayout): SheetData['freeze'] {
+  return {
+    xSplit: layout.frozenCols,
+    ySplit: layout.headerRows,
+    startRow: layout.headerRows,
+    startColumn: layout.frozenCols,
+  };
+}
+
+/**
+ * Replaces the header merges and frozen panes of the previous layout with
+ * those of the new one. Merges and freezing the user changed are kept.
+ * Modifies `workbook`.
+ */
+function applyLayout(
+  workbook: WorkbookData,
+  previous: GridLayout,
+  layout: GridLayout,
+) {
+  const sheet = firstSheet(workbook);
+  if (!sheet) return;
+  sheet.mergeData = [
+    ...(sheet.mergeData ?? []).filter(
+      range => !previous.merges.some(old => sameRange(old, range)),
+    ),
+    ...layout.merges,
+  ];
+  const { freeze } = sheet;
+  if (
+    !freeze ||
+    (freeze.ySplit === previous.headerRows &&
+      freeze.xSplit === previous.frozenCols)
+  ) {
+    sheet.freeze = layoutFreeze(layout);
+  }
+}
+
 /**
  * Writes the query result into the top-left corner of the first sheet.
  * Styles of existing cells are kept, so formatting survives a data refresh.
@@ -139,6 +295,7 @@ export function applyGrid(
   workbook: WorkbookData,
   grid: Grid,
   previous: { rows: number; cols: number } | null,
+  headerRows = 1,
 ): WorkbookData {
   const result = cloneDeep(workbook);
   const sheetId = result.sheetOrder?.[0];
@@ -158,7 +315,7 @@ export function applyGrid(
       const cell: CellData = omit(row[c] ?? {}, DATA_KEYS);
       const value = r < rows && c < cols ? grid[r][c] : null;
       if (value !== null) cell.v = value;
-      if (r === 0 && value !== null && !cell.s && hasHeaderStyle) {
+      if (r < headerRows && value !== null && !cell.s && hasHeaderStyle) {
         cell.s = HEADER_STYLE_ID;
       }
       if (Object.keys(cell).length) row[c] = cell;
@@ -312,7 +469,10 @@ function fitColumnWidths(grid: Grid): Record<number, { w: number }> {
   return widths;
 }
 
-export function createWorkbookData(grid: Grid): WorkbookData {
+export function createWorkbookData(
+  grid: Grid,
+  layout: GridLayout = DEFAULT_LAYOUT,
+): WorkbookData {
   const { rows, cols } = gridSize(grid);
   return applyGrid(
     {
@@ -331,15 +491,17 @@ export function createWorkbookData(grid: Grid): WorkbookData {
           rowCount: rows,
           columnCount: cols,
           defaultColumnWidth: MIN_COL_WIDTH,
-          // keep the header row visible while scrolling
-          freeze: { xSplit: 0, ySplit: 1, startRow: 1, startColumn: 0 },
+          // keep the headers (and pivot row fields) visible while scrolling
+          freeze: layoutFreeze(layout),
           columnData: fitColumnWidths(grid),
+          mergeData: layout.merges,
           cellData: {},
         },
       },
     },
     grid,
     null,
+    layout.headerRows,
   );
 }
 
@@ -349,18 +511,26 @@ export function createWorkbookData(grid: Grid): WorkbookData {
  * chart small. Formatting of those cells is kept, and so are headers the user
  * renamed.
  */
-export function stripGrid(workbook: WorkbookData, grid: Grid): WorkbookData {
+export function stripGrid(
+  workbook: WorkbookData,
+  grid: Grid,
+  headerRows = 1,
+): WorkbookData {
   const { rows, cols } = gridSize(grid);
   const result = applyGrid(workbook, [], { rows, cols });
-  const sheetId = workbook.sheetOrder?.[0];
-  const header = sheetId ? workbook.sheets?.[sheetId]?.cellData?.[0] : null;
-  const cellData = sheetId ? result.sheets?.[sheetId]?.cellData : null;
-  if (!header || !cellData) return result;
+  const cells = firstSheet(workbook)?.cellData;
+  const cellData = firstSheet(result)?.cellData;
+  if (!cells || !cellData) return result;
 
-  for (let c = 0; c < cols; c += 1) {
-    const value = header[c]?.v;
-    if (value !== undefined && value !== null && value !== grid[0][c]) {
-      cellData[0] = { ...cellData[0], [c]: { ...cellData[0]?.[c], v: value } };
+  for (let r = 0; r < Math.min(headerRows, rows); r += 1) {
+    for (let c = 0; c < cols; c += 1) {
+      const value = cells[r]?.[c]?.v;
+      if (value !== undefined && value !== null && value !== grid[r][c]) {
+        cellData[r] = {
+          ...cellData[r],
+          [c]: { ...cellData[r]?.[c], v: value },
+        };
+      }
     }
   }
   return result;
@@ -385,35 +555,41 @@ export function buildWorkbook(
   grid: Grid,
   saved: UniverSavedState | null,
   liveData: boolean,
+  layout: GridLayout = DEFAULT_LAYOUT,
 ): WorkbookData {
-  if (!saved) return createWorkbookData(grid);
+  if (!saved) return createWorkbookData(grid, layout);
   // a stripped sheet has no values in the data area, they must come from the query
   if (!liveData && !saved.stripped) {
     return fitSheetSize(cloneDeep(saved.workbook), []);
   }
-  // the query's labels go in as is, except where the user renamed a column
-  const renamed =
-    saved.workbook.sheets?.[saved.workbook.sheetOrder?.[0] ?? '']
-      ?.cellData?.[0];
-  const headers = (grid[0] ?? []).map((label, c) => {
-    const value = renamed?.[c]?.v;
-    return value !== undefined && value !== null && saved.headers?.[c] === label
-      ? value
-      : label;
-  });
-  return fitSheetSize(
-    applyGrid(saved.workbook, [headers, ...grid.slice(1)], {
-      rows: saved.dataRows,
-      cols: saved.dataCols,
+  // the query's labels go in as is, except where the user renamed a header
+  const renamed = firstSheet(saved.workbook)?.cellData;
+  const savedHeaders = saved.headerGrid ?? [saved.headers ?? []];
+  const headers = grid.slice(0, layout.headerRows).map((row, r) =>
+    row.map((label, c) => {
+      const value = renamed?.[r]?.[c]?.v;
+      return value !== undefined &&
+        value !== null &&
+        savedHeaders[r]?.[c] === label
+        ? value
+        : label;
     }),
-    grid,
   );
+  const workbook = applyGrid(
+    saved.workbook,
+    [...headers, ...grid.slice(layout.headerRows)],
+    { rows: saved.dataRows, cols: saved.dataCols },
+    layout.headerRows,
+  );
+  applyLayout(workbook, saved.layout ?? DEFAULT_LAYOUT, layout);
+  return fitSheetSize(workbook, grid);
 }
 
 export function serializeState(
   workbook: WorkbookData,
   grid: Grid,
   liveData: boolean,
+  layout: GridLayout = DEFAULT_LAYOUT,
 ): string {
   const { rows, cols } = gridSize(grid);
   const state: UniverSavedState = {
@@ -422,7 +598,11 @@ export function serializeState(
     dataCols: cols,
     stripped: liveData,
     headers: grid[0] ?? [],
-    workbook: liveData ? stripGrid(workbook, grid) : workbook,
+    headerGrid: grid.slice(0, layout.headerRows),
+    layout,
+    workbook: liveData
+      ? stripGrid(workbook, grid, layout.headerRows)
+      : workbook,
   };
   return JSON.stringify(state);
 }

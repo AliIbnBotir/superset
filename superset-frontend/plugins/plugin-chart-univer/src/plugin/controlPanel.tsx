@@ -32,6 +32,11 @@ import {
   orderByControlSetItem,
   orderDescendingControlSetItem,
 } from './controls/orderBy';
+import {
+  pivotColumnsControlSetItem,
+  pivotRowsControlSetItem,
+  pivotTotalsControlSetItem,
+} from './controls/pivot';
 import { queryModeControlSetItem } from './controls/queryMode';
 import {
   liveDataControlSetItem,
@@ -47,7 +52,10 @@ const config: ControlPanelConfig = {
       controlSetRows: [
         [queryModeControlSetItem],
         [groupByControlSetItem],
+        [pivotRowsControlSetItem],
+        [pivotColumnsControlSetItem],
         [metricsControlSetItem, allColumnsControlSetItem],
+        [pivotTotalsControlSetItem],
         [timeSeriesLimitMetricControlSetItem, orderByControlSetItem],
         [orderDescendingControlSetItem],
         [rowLimitControlSetItem],

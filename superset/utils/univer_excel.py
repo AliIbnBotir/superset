@@ -34,7 +34,7 @@ import io
 import math
 import re
 from datetime import date, datetime
-from typing import Any, Optional, Union
+from typing import Any, Optional, TypedDict, Union
 
 import numpy as np
 import pandas as pd
@@ -50,10 +50,27 @@ from superset.utils.core import GenericDataType
 VIZ_TYPE = "univer_sheet"
 WORKBOOK_CONTROL = "univer_workbook"
 LIVE_DATA_CONTROL = "univer_live_data"
+PIVOT_MODE = "pivot"
+PIVOT_ROWS_CONTROL = "univer_pivot_rows"
 
 CellValue = Union[str, int, float, bool]
 Grid = list[list[Optional[CellValue]]]
 UniverWorkbook = dict[str, Any]
+MergeRange = dict[str, int]
+
+
+class GridLayout(TypedDict):
+    """How the query result is laid out in the grid, as in the frontend."""
+
+    headerRows: int
+    frozenCols: int
+    merges: list[MergeRange]
+
+
+def default_layout() -> GridLayout:
+    """One header row, nothing frozen on the left, no merges."""
+    return {"headerRows": 1, "frozenCols": 0, "merges": []}
+
 
 HEADER_STYLE_ID = "superset_header"
 # cell fields that hold the value, everything else (like style) is kept
@@ -162,16 +179,105 @@ def to_cell_value(
     return json.dumps(value, default=str)
 
 
-def build_grid(df: pd.DataFrame, coltypes: list[GenericDataType]) -> Grid:
-    """The query result as a grid: the header row followed by the data rows."""
-    columns = list(df.columns)
+def _data_rows(df: pd.DataFrame, coltypes: list[GenericDataType]) -> Grid:
     types: list[Optional[GenericDataType]] = list(coltypes) + [None] * (
-        len(columns) - len(coltypes)
+        len(df.columns) - len(coltypes)
     )
-    grid: Grid = [[str(column) for column in columns]]
-    for row in df.itertuples(index=False, name=None):
-        grid.append([to_cell_value(value, types[i]) for i, value in enumerate(row)])
-    return grid
+    return [
+        [to_cell_value(value, types[i]) for i, value in enumerate(row)]
+        for row in df.itertuples(index=False, name=None)
+    ]
+
+
+def build_grid(
+    df: pd.DataFrame,
+    coltypes: list[GenericDataType],
+    labels: Optional[dict[str, str]] = None,
+) -> Grid:
+    """The query result as a grid: the header row followed by the data rows."""
+    labels = labels or {}
+    header: list[Optional[CellValue]] = [
+        labels.get(str(column), str(column)) for column in df.columns
+    ]
+    return [header, *_data_rows(df, coltypes)]
+
+
+def _split_flat_name(name: str) -> list[str]:
+    """Levels of a flattened pivot column name, e.g. "SUM(sales), Action"."""
+    return [part.replace("\\,", ",") for part in re.split(r"(?<!\\), ", name)]
+
+
+def _header_merges(
+    levels: list[list[str]], header: Grid, row_fields: int
+) -> list[MergeRange]:
+    header_rows = len(header)
+    merges: list[MergeRange] = []
+    if header_rows > 1:
+        merges.extend(
+            {"startRow": 0, "endRow": header_rows - 1, "startColumn": c, "endColumn": c}
+            for c in range(row_fields)
+        )
+    # a header spans the columns below it that share all levels above
+    total = row_fields + len(levels)
+    for r in range(header_rows - 1):
+        start = row_fields
+        for c in range(row_fields + 1, total + 1):
+            same = (
+                c < total
+                and levels[c - row_fields][: r + 1]
+                == levels[start - row_fields][: r + 1]
+            )
+            if not same:
+                if c - 1 > start and header[r][start] is not None:
+                    merges.append(
+                        {
+                            "startRow": r,
+                            "endRow": r,
+                            "startColumn": start,
+                            "endColumn": c - 1,
+                        }
+                    )
+                start = c
+    return merges
+
+
+def build_pivot_grid(
+    df: pd.DataFrame,
+    coltypes: list[GenericDataType],
+    labels: dict[str, str],
+    row_fields: int,
+) -> tuple[Grid, GridLayout]:
+    """
+    Lays out a pivoted query result like the frontend's ``buildPivotGrid``:
+    the first ``row_fields`` columns are the pivot's row fields, the others are
+    named "metric, value, ..." by the ``flatten`` post-processing. Each level
+    gets a header row, equal neighbouring headers are merged. The row fields'
+    names go in the top header row, merged down over the others.
+    """
+    columns = [str(column) for column in df.columns]
+    levels = [_split_flat_name(name) for name in columns[row_fields:]]
+    header_rows = max([1, *[len(parts) for parts in levels]])
+    header: Grid = []
+    for r in range(header_rows):
+        row: list[Optional[CellValue]] = []
+        for c, column in enumerate(columns):
+            if c < row_fields:
+                row.append(labels.get(column, column) if r == 0 else None)
+                continue
+            parts = levels[c - row_fields]
+            value = parts[r] if r < len(parts) else ""
+            if not value:
+                row.append(None)
+            else:
+                # the top level is the metric
+                row.append(labels.get(value, value) if r == 0 else value)
+        header.append(row)
+    layout: GridLayout = {
+        "headerRows": header_rows,
+        "frozenCols": row_fields,
+        "merges": _header_merges(levels, header, row_fields),
+    }
+    return [*header, *_data_rows(df, coltypes)], layout
 
 
 def _grid_size(grid: Grid) -> tuple[int, int]:
@@ -187,6 +293,7 @@ def apply_grid(
     workbook: UniverWorkbook,
     grid: Grid,
     previous: Optional[tuple[int, int]],
+    header_rows: int = 1,
 ) -> UniverWorkbook:
     """
     Writes the query result into the top-left corner of the first sheet.
@@ -212,7 +319,13 @@ def apply_grid(
             value = grid[r][c] if r < rows and c < cols else None
             if value is not None:
                 cell["v"] = value
-            if r == 0 and value is not None and not cell.get("s") and has_header_style:
+            is_header = r < header_rows
+            if (
+                is_header
+                and value is not None
+                and not cell.get("s")
+                and has_header_style
+            ):
                 cell["s"] = HEADER_STYLE_ID
             if cell:
                 row[str(c)] = cell
@@ -233,8 +346,43 @@ def _fit_column_widths(grid: Grid) -> dict[str, dict[str, int]]:
     return widths
 
 
-def create_workbook_data(grid: Grid) -> UniverWorkbook:
+def _layout_freeze(layout: GridLayout) -> dict[str, int]:
+    return {
+        "xSplit": layout["frozenCols"],
+        "ySplit": layout["headerRows"],
+        "startRow": layout["headerRows"],
+        "startColumn": layout["frozenCols"],
+    }
+
+
+def _apply_layout(
+    workbook: UniverWorkbook, previous: GridLayout, layout: GridLayout
+) -> None:
+    """
+    Replaces the header merges and frozen panes of the previous layout with
+    those of the new one, keeping merges and freezing the user changed.
+    """
+    sheet = _first_sheet(workbook)
+    if sheet is None:
+        return
+    sheet["mergeData"] = [
+        merge
+        for merge in sheet.get("mergeData") or []
+        if merge not in previous["merges"]
+    ] + layout["merges"]
+    freeze = sheet.get("freeze")
+    if not freeze or (
+        freeze.get("ySplit") == previous["headerRows"]
+        and freeze.get("xSplit") == previous["frozenCols"]
+    ):
+        sheet["freeze"] = _layout_freeze(layout)
+
+
+def create_workbook_data(
+    grid: Grid, layout: Optional[GridLayout] = None
+) -> UniverWorkbook:
     """The workbook the chart shows when the user hasn't saved any edits."""
+    layout = layout or default_layout()
     rows, cols = _grid_size(grid)
     workbook = {
         "id": "superset-univer",
@@ -248,39 +396,63 @@ def create_workbook_data(grid: Grid) -> UniverWorkbook:
                 "rowCount": rows,
                 "columnCount": cols,
                 "defaultColumnWidth": MIN_COL_WIDTH,
-                "freeze": {"xSplit": 0, "ySplit": 1, "startRow": 1, "startColumn": 0},
+                "freeze": _layout_freeze(layout),
                 "columnData": _fit_column_widths(grid),
+                "mergeData": layout["merges"],
                 "cellData": {},
             }
         },
     }
-    return apply_grid(workbook, grid, None)
+    return apply_grid(workbook, grid, None, layout["headerRows"])
 
 
 def build_workbook(
-    grid: Grid, saved: Optional[dict[str, Any]], live_data: bool
+    grid: Grid,
+    saved: Optional[dict[str, Any]],
+    live_data: bool,
+    layout: Optional[GridLayout] = None,
 ) -> UniverWorkbook:
     """The workbook the chart shows, the query result with the user's edits."""
+    layout = layout or default_layout()
     if saved is None:
-        return create_workbook_data(grid)
+        return create_workbook_data(grid, layout)
     # a stripped sheet has no values in the data area, they come from the query
     if not live_data and not saved.get("stripped"):
         return copy.deepcopy(saved["workbook"])
 
-    # the query's labels go in as is, except where the user renamed a column
-    sheet = _first_sheet(saved["workbook"]) or {}
-    renamed = (sheet.get("cellData") or {}).get("0") or {}
-    saved_headers = saved.get("headers") or []
-    headers: list[Optional[CellValue]] = []
-    for c, label in enumerate(grid[0] if grid else []):
-        value = (renamed.get(str(c)) or {}).get("v")
-        same_column = c < len(saved_headers) and saved_headers[c] == label
-        headers.append(value if value is not None and same_column else label)
-    return apply_grid(
+    header_rows = layout["headerRows"]
+    workbook = apply_grid(
         saved["workbook"],
-        [headers, *grid[1:]],
+        [*_saved_headers(grid, saved, header_rows), *grid[header_rows:]],
         (saved.get("dataRows", 0), saved.get("dataCols", 0)),
+        header_rows,
     )
+    _apply_layout(workbook, saved.get("layout") or default_layout(), layout)
+    return workbook
+
+
+def _saved_headers(grid: Grid, saved: dict[str, Any], header_rows: int) -> Grid:
+    """
+    The query's header rows, except where the user renamed a header. A renamed
+    header is kept while the query's label for it stays the same.
+    """
+    cell_data = (_first_sheet(saved["workbook"]) or {}).get("cellData") or {}
+    saved_grid = saved.get("headerGrid") or [saved.get("headers") or []]
+    headers: Grid = []
+    for r, row in enumerate(grid[:header_rows]):
+        renamed = cell_data.get(str(r)) or {}
+        saved_row = saved_grid[r] if r < len(saved_grid) else []
+        headers.append(
+            [
+                value
+                if (value := (renamed.get(str(c)) or {}).get("v")) is not None
+                and c < len(saved_row)
+                and saved_row[c] == label
+                else label
+                for c, label in enumerate(row)
+            ]
+        )
+    return headers
 
 
 def _to_hex(color: Any) -> Optional[str]:
@@ -560,16 +732,24 @@ def df_to_univer_excel(
     df: pd.DataFrame,
     coltypes: list[GenericDataType],
     form_data: dict[str, Any],
+    labels: Optional[dict[str, str]] = None,
 ) -> bytes:
     """
-    The spreadsheet chart as an .xlsx file: the query result in ``df`` (with
-    column labels as the chart shows them) and the user's saved edits.
+    The spreadsheet chart as an .xlsx file: the query result in ``df`` and the
+    user's saved edits. ``labels`` are the verbose names shown in the headers.
     """
+    labels = labels or {}
+    if form_data.get("query_mode") == PIVOT_MODE:
+        row_fields = len(form_data.get(PIVOT_ROWS_CONTROL) or [])
+        grid, layout = build_pivot_grid(df, coltypes, labels, row_fields)
+    else:
+        grid, layout = build_grid(df, coltypes, labels), default_layout()
     saved = parse_saved_state(form_data.get(WORKBOOK_CONTROL))
     live_data = form_data.get(LIVE_DATA_CONTROL)
     workbook = build_workbook(
-        build_grid(df, coltypes),
+        grid,
         saved,
         True if live_data is None else bool(live_data),
+        layout,
     )
     return workbook_to_excel(workbook)
