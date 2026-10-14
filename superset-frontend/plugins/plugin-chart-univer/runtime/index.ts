@@ -55,6 +55,7 @@ export const mountUniver: MountUniver = ({
   outline,
   onOutlineChange,
   headerLabels = true,
+  outlineSummaryAbove,
 }) => {
   // Univer's own element, so that it leaves alone the group buttons placed
   // next to it in `container` (see outline.ts)
@@ -163,6 +164,7 @@ export const mountUniver: MountUniver = ({
     outline: outline ?? { rows: [], columns: [] },
     editable,
     headerLabels,
+    summaryAbove: outlineSummaryAbove,
     onChange: onOutlineChange,
   });
 

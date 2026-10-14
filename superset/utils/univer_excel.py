@@ -52,6 +52,11 @@ WORKBOOK_CONTROL = "univer_workbook"
 LIVE_DATA_CONTROL = "univer_live_data"
 PIVOT_MODE = "pivot"
 PIVOT_ROWS_CONTROL = "univer_pivot_rows"
+ROW_GROUPING_CONTROL = "univer_row_grouping"
+# labels of the rows added when grouping rows, as in the frontend
+PIVOT_TOTAL = "Total"
+SUBTOTALS = "Subtotals"
+GRAND_TOTAL = "Grand Total"
 
 CellValue = Union[str, int, float, bool]
 Grid = list[list[Optional[CellValue]]]
@@ -59,12 +64,17 @@ UniverWorkbook = dict[str, Any]
 MergeRange = dict[str, int]
 
 
-class GridLayout(TypedDict):
-    """How the query result is laid out in the grid, as in the frontend."""
-
+class _GridLayoutBase(TypedDict):
     headerRows: int
     frozenCols: int
     merges: list[MergeRange]
+
+
+class GridLayout(_GridLayoutBase, total=False):
+    """How the query result is laid out in the grid, as in the frontend."""
+
+    # total rows added by group_rows, shown in bold
+    subtotalRows: list[int]
 
 
 def default_layout() -> GridLayout:
@@ -83,18 +93,31 @@ class OutlineGroup(_OutlineGroupBase, total=False):
     collapsed: bool
 
 
-class Outline(TypedDict):
-    """Collapsible row and column groups of the first sheet."""
-
+class _OutlineBase(TypedDict):
     rows: list[OutlineGroup]
     columns: list[OutlineGroup]
 
+
+class Outline(_OutlineBase, total=False):
+    """Collapsible row and column groups of the first sheet."""
+
+    # the total rows of row groups are above them, see group_rows
+    summaryAbove: bool
+
+
+# groups the user makes with Group rows / Group columns, turned off in the
+# frontend while they clash with the automatic grouping (see MANUAL_GROUPS in
+# outline.ts): saved ones are ignored
+MANUAL_GROUPS = False
 
 # where the first sheet's outline is kept for the writer
 OUTLINE_KEY = "_superset_outline"
 
 
 HEADER_STYLE_ID = "superset_header"
+# style of grouped rows' totals and merged values, see group_rows
+SUBTOTAL_STYLE_ID = "superset_subtotal"
+SUBTOTAL_STYLE = {"bl": 1, "vt": 1}
 # cell fields that hold the value, everything else (like style) is kept
 DATA_KEYS = ("v", "t", "f", "si", "p")
 
@@ -387,10 +410,21 @@ def _apply_layout(
     sheet = _first_sheet(workbook)
     if sheet is None:
         return
+
+    def crosses(a: MergeRange, b: MergeRange) -> bool:
+        return (
+            a["startRow"] <= b["endRow"]
+            and b["startRow"] <= a["endRow"]
+            and a["startColumn"] <= b["endColumn"]
+            and b["startColumn"] <= a["endColumn"]
+        )
+
+    # merged cells overlapping the new layout's would hide its data
     sheet["mergeData"] = [
         merge
         for merge in sheet.get("mergeData") or []
         if merge not in previous["merges"]
+        and not any(crosses(new, merge) for new in layout["merges"])
     ] + layout["merges"]
     freeze = sheet.get("freeze")
     if not freeze or (
@@ -425,7 +459,9 @@ def create_workbook_data(
             }
         },
     }
-    return apply_grid(workbook, grid, None, layout["headerRows"])
+    result = apply_grid(workbook, grid, None, layout["headerRows"])
+    _apply_group_styles(result, layout)
+    return result
 
 
 def build_workbook(
@@ -450,7 +486,44 @@ def build_workbook(
         header_rows,
     )
     _apply_layout(workbook, saved.get("layout") or default_layout(), layout)
+    _apply_group_styles(workbook, layout)
     return workbook
+
+
+def _apply_group_styles(workbook: UniverWorkbook, layout: GridLayout) -> None:
+    """
+    Shows the totals and merged values of grouped rows in bold, like the
+    frontend's ``applyGroupStyles``. Modifies ``workbook``.
+    """
+    sheet = _first_sheet(workbook)
+    if sheet is None:
+        return
+    cell_data: dict[str, Any] = sheet.setdefault("cellData", {})
+    styled: set[tuple[str, str]] = set()
+    for r in layout.get("subtotalRows") or []:
+        styled.update((str(r), c) for c in (cell_data.get(str(r)) or {}))
+    styled.update(
+        (str(merge["startRow"]), str(merge["startColumn"]))
+        for merge in layout["merges"]
+        if merge["startRow"] >= layout["headerRows"]
+    )
+    for r, row in cell_data.items():
+        for c, cell in (row or {}).items():
+            if (
+                isinstance(cell, dict)
+                and cell.get("s") == SUBTOTAL_STYLE_ID
+                and (r, c) not in styled
+            ):
+                del cell["s"]
+    for r, c in styled:
+        cell = cell_data.setdefault(r, {}).setdefault(c, {})
+        if not cell.get("s"):
+            cell["s"] = SUBTOTAL_STYLE_ID
+    if styled:
+        workbook["styles"] = {
+            **(workbook.get("styles") or {}),
+            SUBTOTAL_STYLE_ID: SUBTOTAL_STYLE,
+        }
 
 
 def _saved_headers(grid: Grid, saved: dict[str, Any], header_rows: int) -> Grid:
@@ -475,6 +548,132 @@ def _saved_headers(grid: Grid, saved: dict[str, Any], header_rows: int) -> Grid:
             ]
         )
     return headers
+
+
+def _subtotal(rows: Grid, column: int) -> Optional[CellValue]:
+    numbers = [
+        row[column]
+        for row in rows
+        if isinstance(row[column], (int, float)) and not isinstance(row[column], bool)
+    ]
+    if not numbers:
+        return None
+    total = sum(numbers)  # type: ignore
+    return float(f"{total:.12g}") if isinstance(total, float) else total
+
+
+def group_rows(
+    grid: Grid, layout: GridLayout, dimensions: int, grand_total: bool
+) -> tuple[Grid, GridLayout, list[OutlineGroup]]:
+    """
+    Groups the data rows by their first ``dimensions`` columns with a
+    "Subtotals" row on top of each group, like the frontend's ``groupRows``.
+    """
+    header_rows = layout["headerRows"]
+    cols = len(grid[0]) if grid else 0
+    if dimensions < 2 or dimensions > cols:
+        return grid, layout, []
+
+    data = grid[header_rows:]
+    tail: Grid = []
+    if (
+        data
+        and data[-1][0] == PIVOT_TOTAL
+        and all(value in (None, "") for value in data[-1][1:dimensions])
+    ):
+        tail, data = [data[-1]], data[:-1]
+
+    out: Grid = []
+    merges: list[MergeRange] = []
+    groups: list[OutlineGroup] = []
+    subtotal_rows: list[int] = []
+
+    def build(rows: Grid, level: int) -> None:
+        if level == dimensions - 1:
+            out.extend(rows)
+            return
+        parts: dict[str, Grid] = {}
+        for row in rows:
+            parts.setdefault(_js_string(row[level]), []).append(row)
+        for part in parts.values():
+            top = header_rows + len(out)
+            subtotal_rows.append(top)
+            out.append(
+                [
+                    part[0][level]
+                    if c == level
+                    else SUBTOTALS
+                    if c == level + 1
+                    else None
+                    if c < dimensions
+                    else _subtotal(part, c)
+                    for c in range(cols)
+                ]
+            )
+            build(part, level + 1)
+            end = header_rows + len(out) - 1
+            merges.append(
+                {
+                    "startRow": top,
+                    "endRow": end,
+                    "startColumn": level,
+                    "endColumn": level,
+                }
+            )
+            groups.append({"start": top + 1, "end": end})
+
+    build(data, 0)
+    if grand_total and not tail:
+        subtotal_rows.append(header_rows + len(out))
+        out.append(
+            [
+                GRAND_TOTAL
+                if c == 0
+                else None
+                if c < dimensions
+                else _subtotal(data, c)
+                for c in range(cols)
+            ]
+        )
+    return (
+        [*grid[:header_rows], *out, *tail],
+        {
+            **layout,
+            "merges": [*layout["merges"], *merges],
+            "subtotalRows": subtotal_rows,
+        },
+        groups,
+    )
+
+
+def combine_groups(
+    automatic: list[OutlineGroup], saved: list[OutlineGroup]
+) -> list[OutlineGroup]:
+    """The automatic groups with the saved ones, like ``combineGroups``."""
+    groups: list[OutlineGroup] = sorted(
+        (dict(group) for group in automatic),  # type: ignore
+        key=lambda group: (group["start"], -(group["end"] - group["start"])),
+    )
+    for group in saved:
+        same = next(
+            (
+                other
+                for other in groups
+                if other["start"] == group["start"] and other["end"] == group["end"]
+            ),
+            None,
+        )
+        if same is not None:
+            same["collapsed"] = bool(group.get("collapsed"))
+            continue
+        added = _add_group(groups, group["start"], group["end"])
+        if added is None:
+            continue
+        for other in added:
+            if other["start"] == group["start"] and other["end"] == group["end"]:
+                other["collapsed"] = bool(group.get("collapsed"))
+        groups = added
+    return groups
 
 
 def _js_string(value: Any) -> str:
@@ -792,17 +991,24 @@ def _set_layout(ws: Worksheet, sheet: dict[str, Any]) -> None:
         ws.freeze_panes(y_split, x_split)
 
 
-def _outline_levels(groups: list[OutlineGroup]) -> tuple[dict[int, int], set[int]]:
+def _outline_levels(
+    groups: list[OutlineGroup], summary_above: bool = False
+) -> tuple[dict[int, int], set[int]]:
     """
-    Excel outline level of each row (or column) in a group, and the rows
-    after collapsed groups, which Excel marks as collapsed.
+    Excel outline level of each row (or column) in a group, and the total
+    rows (after the group, or before it) of collapsed groups, which Excel
+    marks as collapsed.
     """
     levels: dict[int, int] = {}
     for group in groups:
         for i in range(group["start"], group["end"] + 1):
             # Excel has at most 7 levels
             levels[i] = min(levels.get(i, 0) + 1, 7)
-    collapsed = {group["end"] + 1 for group in groups if group.get("collapsed")}
+    collapsed = {
+        group["start"] - 1 if summary_above else group["end"] + 1
+        for group in groups
+        if group.get("collapsed")
+    }
     return levels, collapsed
 
 
@@ -817,7 +1023,10 @@ def _set_dimensions(ws: Worksheet, sheet: dict[str, Any]) -> None:
     """Column widths, row heights, hidden rows and columns, and groups."""
     outline: Outline = sheet.get(OUTLINE_KEY) or {"rows": [], "columns": []}
     column_levels, collapsed_columns = _outline_levels(outline["columns"])
-    row_levels, collapsed_rows = _outline_levels(outline["rows"])
+    summary_above = bool(outline.get("summaryAbove"))
+    row_levels, collapsed_rows = _outline_levels(outline["rows"], summary_above)
+    if summary_above:
+        ws.outline_settings(True, False, True, False)
 
     default_width = sheet.get("defaultColumnWidth") or DEFAULT_COL_WIDTH
     columns = sheet.get("columnData") or {}
@@ -935,14 +1144,38 @@ def df_to_univer_excel(
         if form_data.get(LIVE_DATA_CONTROL) is None
         else bool(form_data.get(LIVE_DATA_CONTROL))
     )
+    key_columns = _key_columns(form_data)
+    automatic: list[OutlineGroup] = []
+    if form_data.get(ROW_GROUPING_CONTROL) and (key_columns or 0) > 1:
+        # a pivot has its own Total row
+        grid, layout, automatic = group_rows(
+            grid,
+            layout,
+            key_columns or 0,
+            form_data.get("query_mode") != PIVOT_MODE,
+        )
     workbook = build_workbook(grid, saved, live_data, layout)
     from_query = live_data or bool(saved and saved.get("stripped"))
     outline = resolve_outline(
         (saved or {}).get("outline"),
         grid if from_query else [],
         layout["headerRows"],
-        _key_columns(form_data),
+        key_columns,
     )
+    if not MANUAL_GROUPS:
+        # only the collapsed state of the automatic groups is kept
+        outline["rows"] = [
+            group
+            for group in outline["rows"]
+            if any(
+                auto["start"] == group["start"] and auto["end"] == group["end"]
+                for auto in automatic
+            )
+        ]
+        outline["columns"] = []
+    outline["rows"] = combine_groups(automatic, outline["rows"])
+    if automatic:
+        outline["summaryAbove"] = True
     apply_outline(workbook, outline, grid)
     return workbook_to_excel(workbook)
 

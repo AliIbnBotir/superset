@@ -40,6 +40,7 @@ import {
 import { queryModeControlSetItem } from './controls/queryMode';
 import {
   liveDataControlSetItem,
+  rowGroupingControlSetItem,
   showHeadersControlSetItem,
   workbookControlSetItem,
 } from './controls/univer';
@@ -68,6 +69,7 @@ const config: ControlPanelConfig = {
       controlSetRows: [
         [workbookControlSetItem],
         [liveDataControlSetItem],
+        [rowGroupingControlSetItem],
         [showHeadersControlSetItem],
       ],
     },

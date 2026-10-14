@@ -19,10 +19,11 @@ from datetime import datetime
 from typing import Any
 
 import pandas as pd
+import pytest
 from openpyxl import load_workbook
 from openpyxl.worksheet.worksheet import Worksheet
 
-from superset.utils import json
+from superset.utils import json, univer_excel
 from superset.utils.core import GenericDataType
 from superset.utils.pandas_postprocessing import flatten, pivot
 from superset.utils.univer_excel import (
@@ -254,7 +255,8 @@ def test_export_pivot() -> None:
     assert ws.freeze_panes == "B3"
 
 
-def test_export_outline_groups() -> None:
+def test_export_outline_groups(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(univer_excel, "MANUAL_GROUPS", True)
     state = json.loads(saved_state())
     state["outline"] = {
         "rows": [
@@ -284,3 +286,59 @@ def test_export_outline_groups() -> None:
     assert ws.row_dimensions[4].hidden
     assert not ws.row_dimensions[2].hidden
     assert ws.column_dimensions["B"].outline_level == 1
+
+    # while manual groups are turned off, saved ones are ignored
+    monkeypatch.setattr(univer_excel, "MANUAL_GROUPS", False)
+    ws = export(
+        {
+            "viz_type": "univer_sheet",
+            "groupby": ["genre"],
+            "univer_workbook": json.dumps(state),
+        },
+        df,
+    ).active
+    assert not ws.row_dimensions[3].outline_level
+    assert not ws.row_dimensions[3].hidden
+
+
+def test_export_grouped_rows() -> None:
+    df = pd.DataFrame(
+        {
+            "genre": ["Action", "Puzzle", "Action"],
+            "platform": ["PS4", "PS4", "Wii"],
+            "sales": [1, 2, 3.1],
+        }
+    )
+    contents = df_to_univer_excel(
+        df,
+        [GenericDataType.STRING, GenericDataType.STRING, GenericDataType.NUMERIC],
+        {
+            "viz_type": "univer_sheet",
+            "groupby": ["genre", "platform"],
+            "univer_row_grouping": True,
+        },
+    )
+    ws = load_workbook(io.BytesIO(contents)).active
+    assert values(ws) == [
+        ["genre", "platform", "sales"],
+        ["Action", "Subtotals", 4.1],
+        [None, "PS4", 1],
+        [None, "Wii", 3.1],
+        ["Puzzle", "Subtotals", 2],
+        [None, "PS4", 2],
+        ["Grand Total", None, 6.1],
+    ]
+    assert {str(merge) for merge in ws.merged_cells.ranges} == {"A2:A4", "A5:A6"}
+    assert [ws.row_dimensions[r].outline_level for r in range(2, 8)] == [
+        0,
+        1,
+        1,
+        0,
+        1,
+        0,
+    ]
+    assert not ws.sheet_properties.outlinePr.summaryBelow
+    assert ws["A2"].font.bold
+    assert ws["A2"].alignment.vertical == "top"
+    assert ws["C2"].font.bold
+    assert not ws["C3"].font.bold

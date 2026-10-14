@@ -58,5 +58,7 @@ export default function transformProps(
         ? ensureIsArray(formData.univer_pivot_rows).length
         : undefined,
     keyColumns: keyColumns(formData),
+    rowGrouping:
+      !!formData.univer_row_grouping && formData.query_mode !== QueryMode.Raw,
   };
 }

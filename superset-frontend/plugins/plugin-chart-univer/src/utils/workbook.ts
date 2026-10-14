@@ -23,7 +23,9 @@ import {
   hiddenIndexes,
   Outline,
   outlineDepth,
+  OutlineGroup,
   outlineMargin,
+  OUTLINE_LEVEL_SIZE,
   SavedOutline,
 } from './outline';
 import {
@@ -45,6 +47,8 @@ export interface GridLayout {
   frozenCols: number;
   /** merged header cells */
   merges: MergeRange[];
+  /** total rows added by groupRows, shown in bold */
+  subtotalRows?: number[];
 }
 
 export const DEFAULT_LAYOUT: GridLayout = {
@@ -77,6 +81,11 @@ export interface UniverSavedState {
 }
 
 export const HEADER_STYLE_ID = 'superset_header';
+/** style of grouped rows' totals and merged values, see groupRows */
+export const SUBTOTAL_STYLE_ID = 'superset_subtotal';
+const SUBTOTAL_STYLE = { bl: 1, vt: 1 };
+// label of a pivot's Total row, see PIVOT_TOTAL in plugin/buildQuery.ts
+const PIVOT_TOTAL_LABEL = 'Total';
 const WORKBOOK_ID = 'superset-univer';
 const SHEET_ID = 'data';
 // cell fields that hold the value, everything else (like style) is kept
@@ -279,9 +288,17 @@ function applyLayout(
 ) {
   const sheet = firstSheet(workbook);
   if (!sheet) return;
+  const crosses = (a: MergeRange, b: MergeRange) =>
+    a.startRow <= b.endRow &&
+    b.startRow <= a.endRow &&
+    a.startColumn <= b.endColumn &&
+    b.startColumn <= a.endColumn;
   sheet.mergeData = [
+    // merged cells overlapping the new layout's would hide its data
     ...(sheet.mergeData ?? []).filter(
-      range => !previous.merges.some(old => sameRange(old, range)),
+      range =>
+        !previous.merges.some(old => sameRange(old, range)) &&
+        !layout.merges.some(merge => crosses(merge, range)),
     ),
     ...layout.merges,
   ];
@@ -479,12 +496,54 @@ function fitColumnWidths(grid: Grid): Record<number, { w: number }> {
   return widths;
 }
 
+/**
+ * Shows the totals and merged values of grouped rows in bold, with merged
+ * values at the top of their cell. Cells styled by the user keep their
+ * style; cells that were totals before a refresh lose the bold. Modifies
+ * the cells of `workbook`, returns it with the style added.
+ */
+function applyGroupStyles(
+  workbook: WorkbookData,
+  layout: GridLayout,
+): WorkbookData {
+  const sheet = firstSheet(workbook);
+  if (!sheet) return workbook;
+  const cellData = (sheet.cellData ??= {});
+  const styled = new Set<string>();
+  (layout.subtotalRows ?? []).forEach(r => {
+    Object.keys(cellData[r] ?? {}).forEach(c => styled.add(`${r}:${c}`));
+  });
+  layout.merges
+    .filter(merge => merge.startRow >= layout.headerRows)
+    .forEach(merge => styled.add(`${merge.startRow}:${merge.startColumn}`));
+
+  Object.keys(cellData).forEach(r => {
+    const row = cellData[Number(r)];
+    Object.keys(row).forEach(c => {
+      if (row[Number(c)].s === SUBTOTAL_STYLE_ID && !styled.has(`${r}:${c}`)) {
+        row[Number(c)] = omit(row[Number(c)], 's');
+      }
+    });
+  });
+  styled.forEach(key => {
+    const [r, c] = key.split(':').map(Number);
+    const row = (cellData[r] ??= {});
+    if (!row[c]?.s) row[c] = { ...row[c], s: SUBTOTAL_STYLE_ID };
+  });
+  return styled.size
+    ? {
+        ...workbook,
+        styles: { ...workbook.styles, [SUBTOTAL_STYLE_ID]: SUBTOTAL_STYLE },
+      }
+    : workbook;
+}
+
 export function createWorkbookData(
   grid: Grid,
   layout: GridLayout = DEFAULT_LAYOUT,
 ): WorkbookData {
   const { rows, cols } = gridSize(grid);
-  return applyGrid(
+  const workbook = applyGrid(
     {
       id: WORKBOOK_ID,
       name: 'Superset',
@@ -513,6 +572,7 @@ export function createWorkbookData(
     null,
     layout.headerRows,
   );
+  return applyGroupStyles(workbook, layout);
 }
 
 /**
@@ -592,7 +652,7 @@ export function buildWorkbook(
     layout.headerRows,
   );
   applyLayout(workbook, saved.layout ?? DEFAULT_LAYOUT, layout);
-  return fitSheetSize(workbook, grid);
+  return fitSheetSize(applyGroupStyles(workbook, layout), grid);
 }
 
 export function serializeState(
@@ -695,8 +755,11 @@ export function sizeHeaders(
     Object.entries(workbook.sheets ?? {}).map(([id, sheet]) => {
       const width =
         (labels ? ROW_HEADER_WIDTH : 0) + (id === first ? rowMargin : 0);
-      const height =
-        (labels ? COLUMN_HEADER_HEIGHT : 0) + (id === first ? columnMargin : 0);
+      const height = Math.max(
+        (labels ? COLUMN_HEADER_HEIGHT : 0) + (id === first ? columnMargin : 0),
+        // room for the outline level buttons of the row groups
+        id === first && rowMargin ? OUTLINE_LEVEL_SIZE + 2 : 0,
+      );
       return [
         id,
         {
@@ -708,4 +771,108 @@ export function sizeHeaders(
     }),
   );
   return { ...workbook, sheets };
+}
+
+/** Label of the row adding up the whole result when rows are grouped */
+export const GRAND_TOTAL = 'Grand Total';
+
+function subtotal(rows: Grid, column: number): CellValue | null {
+  let sum: number | null = null;
+  rows.forEach(row => {
+    const value = row[column];
+    if (typeof value === 'number') sum = (sum ?? 0) + value;
+  });
+  // drop floating point noise, as toCellValue does
+  return sum === null ? null : Number((sum as number).toPrecision(12));
+}
+
+/** Label of a group's total row, in the column after the group's value */
+export const SUBTOTALS = 'Subtotals';
+
+/**
+ * Groups the data rows by their first `dimensions` columns, like Excel's
+ * Data > Subtotal with the totals above: rows with the same value in the
+ * first column follow each other (in the order the values first appear),
+ * a "Subtotals" row on top adds up the other columns, and the value is merged
+ * into one cell down the group; the same again inside for the next columns,
+ * except the last. Each group's rows can be collapsed to its total row. With
+ * `grandTotal`, a last row adds up everything.
+ *
+ * A pivot's own Total row (see buildQuery) stays last.
+ */
+export function groupRows(
+  grid: Grid,
+  layout: GridLayout,
+  dimensions: number,
+  grandTotal: boolean,
+): { grid: Grid; layout: GridLayout; groups: OutlineGroup[] } {
+  const { headerRows } = layout;
+  const { cols } = gridSize(grid);
+  if (dimensions < 2 || dimensions > cols) return { grid, layout, groups: [] };
+
+  let data = grid.slice(headerRows);
+  const last = data[data.length - 1];
+  const tail =
+    last &&
+    last[0] === PIVOT_TOTAL_LABEL &&
+    last.slice(1, dimensions).every(value => value === null || value === '')
+      ? [last]
+      : [];
+  if (tail.length) data = data.slice(0, -1);
+
+  const out: Grid = [];
+  const merges: MergeRange[] = [];
+  const groups: OutlineGroup[] = [];
+  const subtotalRows: number[] = [];
+  const build = (rows: Grid, level: number) => {
+    if (level === dimensions - 1) {
+      out.push(...rows);
+      return;
+    }
+    const parts = new Map<string, Grid>();
+    rows.forEach(row => {
+      const key = String(row[level] ?? '');
+      parts.set(key, [...(parts.get(key) ?? []), row]);
+    });
+    parts.forEach(part => {
+      const top = headerRows + out.length;
+      subtotalRows.push(top);
+      out.push(
+        Array.from({ length: cols }, (_, c) => {
+          if (c === level) return part[0][level];
+          if (c === level + 1) return SUBTOTALS;
+          return c < dimensions ? null : subtotal(part, c);
+        }),
+      );
+      build(part, level + 1);
+      const end = headerRows + out.length - 1;
+      merges.push({
+        startRow: top,
+        endRow: end,
+        startColumn: level,
+        endColumn: level,
+      });
+      groups.push({ start: top + 1, end });
+    });
+  };
+  build(data, 0);
+
+  if (grandTotal && !tail.length) {
+    subtotalRows.push(headerRows + out.length);
+    out.push(
+      Array.from({ length: cols }, (_, c) => {
+        if (c === 0) return GRAND_TOTAL;
+        return c < dimensions ? null : subtotal(data, c);
+      }),
+    );
+  }
+  return {
+    grid: [...grid.slice(0, headerRows), ...out, ...tail],
+    layout: {
+      ...layout,
+      merges: [...layout.merges, ...merges],
+      subtotalRows,
+    },
+    groups,
+  };
 }

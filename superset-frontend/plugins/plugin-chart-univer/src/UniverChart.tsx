@@ -31,6 +31,7 @@ import {
   buildGrid,
   buildPivotGrid,
   buildWorkbook,
+  groupRows,
   DEFAULT_LAYOUT,
   columnWidth,
   fillWidth,
@@ -43,7 +44,9 @@ import {
   unstretchColumns,
 } from './utils/workbook';
 import {
+  combineGroups,
   EMPTY_OUTLINE,
+  MANUAL_GROUPS,
   Outline,
   outlineDepth,
   outlineMargin,
@@ -76,28 +79,31 @@ export default function UniverChart(props: UniverChartProps) {
     setControlValue,
     pivotRows,
     keyColumns,
+    rowGrouping,
   } = props;
   const containerRef = useRef<HTMLDivElement>(null);
 
   // `labels` is a new object on every render, compare it by content so that
   // saving an edit doesn't rebuild the whole spreadsheet
   const labelsKey = JSON.stringify(labels);
-  const { grid, layout } = useMemo(
-    () =>
-      pivotRows
-        ? buildPivotGrid(
-            data,
-            colnames,
-            coltypes,
-            JSON.parse(labelsKey),
-            pivotRows,
-          )
-        : {
-            grid: buildGrid(data, colnames, coltypes, JSON.parse(labelsKey)),
-            layout: DEFAULT_LAYOUT,
-          },
-    [data, colnames, coltypes, labelsKey, pivotRows],
-  );
+  const { grid, layout, groups } = useMemo(() => {
+    const result = pivotRows
+      ? buildPivotGrid(
+          data,
+          colnames,
+          coltypes,
+          JSON.parse(labelsKey),
+          pivotRows,
+        )
+      : {
+          grid: buildGrid(data, colnames, coltypes, JSON.parse(labelsKey)),
+          layout: DEFAULT_LAYOUT,
+        };
+    return rowGrouping && keyColumns && keyColumns > 1
+      ? // a pivot has its own Total row
+        groupRows(result.grid, result.layout, keyColumns, !pivotRows)
+      : { ...result, groups: [] };
+  }, [data, colnames, coltypes, labelsKey, pivotRows, rowGrouping, keyColumns]);
 
   // The saved state changes in two ways: the chart saved an edit (the sheet on
   // screen already shows it, so nothing to do), or something else changed it,
@@ -134,12 +140,25 @@ export default function UniverChart(props: UniverChartProps) {
 
     const saved = parseSavedState(latestStateRef.current);
     // groups are tied to the query's rows when they come from the query
-    outlineRef.current = resolveOutline(
+    const savedOutline = resolveOutline(
       saved?.outline,
       liveData || saved?.stripped ? grid : [],
       layout.headerRows,
       keyColumns,
     );
+    // without manual groups, only the collapsed state of the automatic ones
+    // is taken from the saved chart
+    const savedRows = MANUAL_GROUPS
+      ? savedOutline.rows
+      : savedOutline.rows.filter(group =>
+          groups.some(
+            auto => auto.start === group.start && auto.end === group.end,
+          ),
+        );
+    outlineRef.current = {
+      rows: combineGroups(groups, savedRows),
+      columns: MANUAL_GROUPS ? savedOutline.columns : [],
+    };
     const mountedOutline = outlineRef.current;
     const headerLabels = editable || showHeaders;
     const workbookData = sizeHeaders(
@@ -186,6 +205,7 @@ export default function UniverChart(props: UniverChartProps) {
         outlineMargin(outlineDepth(outlineRef.current.rows)),
       outline: mountedOutline,
       headerLabels,
+      outlineSummaryAbove: groups.length > 0,
       onOutlineChange: editable
         ? outline => {
             outlineRef.current = outline;
@@ -204,6 +224,7 @@ export default function UniverChart(props: UniverChartProps) {
   }, [
     grid,
     layout,
+    groups,
     keyColumns,
     editable,
     liveData,

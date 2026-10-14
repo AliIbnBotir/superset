@@ -41,6 +41,13 @@ export type OutlineDimension = keyof Outline;
 
 export const EMPTY_OUTLINE: Outline = { rows: [], columns: [] };
 
+/**
+ * Groups the user makes with Group rows / Group columns. Turned off while
+ * they clash with the automatic grouping ("Group rows by dimensions"): no
+ * menu items, and saved ones are ignored. The code is kept to turn back on.
+ */
+export const MANUAL_GROUPS = false;
+
 // width of the margin in the headers for one level of groups
 export const OUTLINE_LEVEL_SIZE = 14;
 
@@ -291,4 +298,48 @@ export function resolveOutline(
     rows: resolveGroups(saved.rows ?? [], keys.rows),
     columns: resolveGroups(saved.columns ?? [], keys.columns),
   };
+}
+
+/**
+ * The automatic groups (see groupRows in workbook.ts) together with the
+ * saved ones: an automatic group the user collapsed stays collapsed, groups
+ * the user added are kept where they don't cross the automatic ones.
+ */
+export function combineGroups(
+  automatic: OutlineGroup[],
+  saved: OutlineGroup[],
+): OutlineGroup[] {
+  return saved.reduce<OutlineGroup[]>((groups, group) => {
+    const same = groups.findIndex(
+      other => other.start === group.start && other.end === group.end,
+    );
+    if (same >= 0) {
+      return groups.map((other, i) =>
+        i === same ? { ...other, collapsed: group.collapsed } : other,
+      );
+    }
+    const added = addGroup(groups, group.start, group.end);
+    if (!added) return groups;
+    return added.map(other =>
+      other.start === group.start && other.end === group.end
+        ? { ...other, collapsed: group.collapsed }
+        : other,
+    );
+  }, sortGroups(automatic));
+}
+
+/**
+ * Collapses the groups nested deeper than `level` (1 shows only what is
+ * outside every group, like Excel's outline level buttons) and expands the
+ * others.
+ */
+export function collapseToLevel(
+  groups: OutlineGroup[],
+  level: number,
+): OutlineGroup[] {
+  const levels = groupLevels(groups);
+  return groups.map((group, i) => ({
+    ...group,
+    collapsed: levels[i] >= level - 1,
+  }));
 }

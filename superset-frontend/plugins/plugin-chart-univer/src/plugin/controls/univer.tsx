@@ -20,9 +20,10 @@ import {
   ControlSetItem,
   CustomControlConfig,
 } from '@superset-ui/chart-controls';
-import { t } from '@superset-ui/core';
+import { ensureIsArray, t } from '@superset-ui/core';
 import { Button } from '@superset-ui/core/components';
 import { WORKBOOK_CONTROL } from '../../types';
+import { isAggMode, isPivotMode } from './shared';
 
 /**
  * Holds the spreadsheet saved from the chart itself. The chart writes it with
@@ -76,5 +77,24 @@ export const showHeadersControlSetItem: ControlSetItem = {
     description: t('Show the A, B, C… and 1, 2, 3… headers outside Explore'),
     default: false,
     renderTrigger: true,
+  },
+};
+
+export const rowGroupingControlSetItem: ControlSetItem = {
+  name: 'univer_row_grouping',
+  config: {
+    type: 'CheckboxControl',
+    label: t('Group rows by dimensions'),
+    description: t(
+      'Show each value of the first dimensions once, merged down its rows, with a Subtotals row on top that adds up the metrics. Groups can be collapsed to their Subtotals row.',
+    ),
+    default: false,
+    renderTrigger: true,
+    // needs two or more dimensions (row fields in pivot mode)
+    visibility: ({ controls }) =>
+      (isAggMode({ controls }) &&
+        ensureIsArray(controls?.groupby?.value).length > 1) ||
+      (isPivotMode({ controls }) &&
+        ensureIsArray(controls?.univer_pivot_rows?.value).length > 1),
   },
 };

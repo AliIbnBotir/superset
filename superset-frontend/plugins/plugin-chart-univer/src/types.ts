@@ -34,6 +34,7 @@ export type UniverQueryFormData = QueryFormData & {
   univer_pivot_rows?: QueryFormColumn[];
   univer_pivot_columns?: QueryFormColumn[];
   univer_pivot_totals?: boolean;
+  univer_row_grouping?: boolean;
 };
 
 export interface UniverChartProps {
@@ -60,5 +61,7 @@ export interface UniverChartProps {
    * when not set.
    */
   keyColumns?: number;
+  /** group the rows by their first `keyColumns` columns, see groupRows */
+  rowGrouping?: boolean;
   setControlValue?: HandlerFunction;
 }

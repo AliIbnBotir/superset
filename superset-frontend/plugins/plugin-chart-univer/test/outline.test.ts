@@ -19,6 +19,8 @@
 import {
   addGroup,
   anchorOutline,
+  collapseToLevel,
+  combineGroups,
   groupLevels,
   hiddenIndexes,
   insertIndexes,
@@ -27,7 +29,12 @@ import {
   removeIndexes,
   resolveOutline,
 } from '../src/utils/outline';
-import { applyOutline, createWorkbookData } from '../src/utils/workbook';
+import {
+  applyOutline,
+  createWorkbookData,
+  DEFAULT_LAYOUT,
+  groupRows,
+} from '../src/utils/workbook';
 
 test('groups nest but do not cross', () => {
   const groups = addGroup([], 2, 8)!;
@@ -102,4 +109,69 @@ test('saved groups follow their rows when the data changes', () => {
   const sheet = applyOutline(createWorkbookData(refreshed), outline, refreshed)
     .sheets!.data;
   expect(sheet.rowData).toEqual({ 3: { hd: 1 }, 4: { hd: 1 } });
+});
+
+test('groupRows adds a merged Subtotals row on top of each group', () => {
+  const { grid, layout, groups } = groupRows(
+    [
+      ['genre', 'platform', 'sales'],
+      ['Action', 'PS4', 1],
+      ['Puzzle', 'PS4', 2],
+      ['Action', 'Wii', 3.1],
+    ],
+    DEFAULT_LAYOUT,
+    2,
+    true,
+  );
+  expect(grid).toEqual([
+    ['genre', 'platform', 'sales'],
+    ['Action', 'Subtotals', 4.1],
+    ['Action', 'PS4', 1],
+    ['Action', 'Wii', 3.1],
+    ['Puzzle', 'Subtotals', 2],
+    ['Puzzle', 'PS4', 2],
+    ['Grand Total', null, 6.1],
+  ]);
+  expect(layout.merges).toEqual([
+    { startRow: 1, endRow: 3, startColumn: 0, endColumn: 0 },
+    { startRow: 4, endRow: 5, startColumn: 0, endColumn: 0 },
+  ]);
+  expect(groups).toEqual([
+    { start: 2, end: 3 },
+    { start: 5, end: 5 },
+  ]);
+});
+
+test('level buttons collapse the groups below that level', () => {
+  const groups = [
+    { start: 1, end: 9 },
+    { start: 2, end: 4 },
+  ];
+  expect(collapseToLevel(groups, 1).map(g => g.collapsed)).toEqual([
+    true,
+    true,
+  ]);
+  expect(collapseToLevel(groups, 2).map(g => g.collapsed)).toEqual([
+    false,
+    true,
+  ]);
+  expect(collapseToLevel(groups, 3).map(g => g.collapsed)).toEqual([
+    false,
+    false,
+  ]);
+});
+
+test('saved collapsed state carries over to the automatic groups', () => {
+  expect(
+    combineGroups(
+      [{ start: 2, end: 3 }],
+      [
+        { start: 2, end: 3, collapsed: true },
+        { start: 8, end: 9 },
+      ],
+    ),
+  ).toEqual([
+    { start: 2, end: 3, collapsed: true },
+    { start: 8, end: 9, collapsed: undefined },
+  ]);
 });

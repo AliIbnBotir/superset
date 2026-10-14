@@ -43,12 +43,13 @@ import {
 } from '@univerjs/preset-sheets-core';
 import {
   addGroup,
+  collapseToLevel,
   groupLevels,
   hiddenIndexes,
   insertIndexes,
+  MANUAL_GROUPS,
   Outline,
   OutlineDimension,
-  OutlineGroup,
   outlineDepth,
   outlineMargin,
   OUTLINE_LEVEL_SIZE,
@@ -74,6 +75,8 @@ export interface OutlineOptions {
   editable: boolean;
   /** false when the sheet's 1, 2, 3… and A, B, C… headers are hidden */
   headerLabels: boolean;
+  /** the total rows of row groups are above them, see groupRows */
+  summaryAbove?: boolean;
   onChange?: (outline: Outline) => void;
 }
 
@@ -93,6 +96,7 @@ export function mountOutline({
   outline: initialOutline,
   editable,
   headerLabels,
+  summaryAbove = false,
   onChange,
 }: OutlineOptions): { dispose: () => void } {
   let outline = initialOutline;
@@ -131,23 +135,18 @@ export function mountOutline({
     );
   };
 
-  // shows a group's rows, except those of collapsed groups inside it
-  const showGroup = (dimension: OutlineDimension, group: OutlineGroup) => {
-    const stillHidden = hiddenIndexes(
-      outline[dimension].filter(
-        other =>
-          other !== group &&
-          other.start >= group.start &&
-          other.end <= group.end,
-      ),
-    );
-    let runStart: number | null = null;
-    for (let i = group.start; i <= group.end + 1; i += 1) {
-      const visible = i <= group.end && !stillHidden.has(i);
-      if (visible && runStart === null) runStart = i;
-      if (!visible && runStart !== null) {
-        setHidden(dimension, runStart, i - 1, false);
-        runStart = null;
+  // shows and hides the rows (or columns) of the groups as they are now
+  const applyVisibility = (dimension: OutlineDimension) => {
+    const groups = outline[dimension];
+    if (!groups.length) return;
+    const hidden = hiddenIndexes(groups);
+    const first = Math.min(...groups.map(group => group.start));
+    const last = Math.max(...groups.map(group => group.end));
+    let runStart = first;
+    for (let i = first + 1; i <= last + 1; i += 1) {
+      if (i > last || hidden.has(i) !== hidden.has(runStart)) {
+        setHidden(dimension, runStart, i - 1, hidden.has(runStart));
+        runStart = i;
       }
     }
   };
@@ -160,14 +159,12 @@ export function mountOutline({
   };
 
   const toggle = (dimension: OutlineDimension, index: number) => {
-    const group = outline[dimension][index];
-    const collapsed = !group.collapsed;
+    const collapsed = !outline[dimension][index].collapsed;
     const groups = outline[dimension].map((other, i) =>
       i === index ? { ...other, collapsed } : other,
     );
     outline = { ...outline, [dimension]: groups };
-    if (collapsed) setHidden(dimension, group.start, group.end, true);
-    else showGroup(dimension, groups[index]);
+    applyVisibility(dimension);
     update(outline);
   };
 
@@ -233,7 +230,10 @@ export function mountOutline({
     groups.forEach((group, index) => {
       // the button goes on the row after the group, like Excel's, or before
       // it when the group ends the sheet
-      const buttonAt = group.end + 1 < count ? group.end + 1 : group.start - 1;
+      const above = isRows && summaryAbove;
+      const after = group.end + 1 < count ? group.end + 1 : group.start - 1;
+      const before = group.start > 0 ? group.start - 1 : group.end + 1;
+      const buttonAt = above ? before : after;
       const across =
         levels[index] * LEVEL_SIZE + (LEVEL_SIZE - BUTTON_SIZE) / 2;
       const clip = (from: number, to: number, i: number) => {
@@ -258,7 +258,8 @@ export function mountOutline({
           }px;${lengthProp}:${(to - from) * zoom}px;${
             isRows ? 'width' : 'height'
           }:4px;border-${isRows ? 'left' : 'top'}:1px solid ${color};border-${
-            isRows ? 'bottom' : 'right'
+            // the tick points at the button
+            isRows ? (above ? 'top' : 'bottom') : 'right'
           }:1px solid ${color};`;
           layer.appendChild(line);
         }
@@ -289,6 +290,37 @@ export function mountOutline({
     });
   };
 
+  // Excel's outline level buttons: 1 shows only what is outside every row
+  // group, the last one shows everything
+  const renderLevels = (origin: { x: number; y: number }, color: string) => {
+    const depth = outlineDepth(outline.rows);
+    for (let level = 1; depth && level <= depth + 1; level += 1) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = String(level);
+      button.title = `Show row group level ${level}`;
+      button.setAttribute('aria-label', button.title);
+      button.style.cssText = `position:absolute;pointer-events:auto;top:${
+        origin.y + 2
+      }px;left:${
+        origin.x + (level - 1) * LEVEL_SIZE + (LEVEL_SIZE - BUTTON_SIZE) / 2
+      }px;width:${BUTTON_SIZE}px;height:${BUTTON_SIZE}px;padding:0;margin:0;border:1px solid ${color};border-radius:2px;background:#fff;color:${color};font:9px/9px sans-serif;cursor:pointer;`;
+      button.addEventListener('pointerdown', event => event.stopPropagation());
+      button.addEventListener('click', event => {
+        event.stopPropagation();
+        // eslint-disable-next-line @typescript-eslint/no-use-before-define
+        showLevel(level);
+      });
+      layer.appendChild(button);
+    }
+  };
+
+  const showLevel = (level: number) => {
+    outline = { ...outline, rows: collapseToLevel(outline.rows, level) };
+    applyVisibility('rows');
+    update(outline);
+  };
+
   let headerSizes = { rows: -1, columns: -1 };
   const sizeHeaders = () => {
     const rows = outlineDepth(outline.rows);
@@ -303,7 +335,11 @@ export function mountOutline({
       ? {}
       : { fontColor: transparent, borderColor: transparent };
     const width = (headerLabels ? ROW_HEADER_WIDTH : 0) + margin(rows);
-    const height = (headerLabels ? COLUMN_HEADER_HEIGHT : 0) + margin(columns);
+    const height = Math.max(
+      (headerLabels ? COLUMN_HEADER_HEIGHT : 0) + margin(columns),
+      // room for the level buttons
+      rows ? OUTLINE_LEVEL_SIZE + 2 : 0,
+    );
     const target = {
       unitId: workbook.getId(),
       subUnitId: sheet().getSheetId(),
@@ -354,6 +390,7 @@ export function mountOutline({
       const color = '#666';
       renderDimension('rows', origin, rect.height, zoom, color);
       renderDimension('columns', origin, rect.width, zoom, color);
+      renderLevels(origin, color);
     }, 16);
   };
   disposers.push(() => clearTimeout(frame));
@@ -402,7 +439,7 @@ export function mountOutline({
   resizeObserver.observe(container);
   disposers.push(() => resizeObserver.disconnect());
 
-  if (editable) {
+  if (editable && MANUAL_GROUPS) {
     const commands = injector.get(ICommandService);
     const menus = injector.get(IMenuManagerService);
     const selection = (dimension: OutlineDimension) => {

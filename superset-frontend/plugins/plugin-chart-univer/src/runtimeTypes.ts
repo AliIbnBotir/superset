@@ -106,6 +106,8 @@ export interface MountUniverOptions {
    * then only show the margin for the groups, if there are any
    */
   headerLabels?: boolean;
+  /** the total rows of row groups are above them (automatic grouping) */
+  outlineSummaryAbove?: boolean;
 }
 
 export interface UniverHandle {
